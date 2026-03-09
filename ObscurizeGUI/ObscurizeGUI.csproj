@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <!--
+      net48 targets the .NET Framework 4.8 runtime which ships with
+      Windows 10/11 — no runtime installation required on end-user machines.
+      WinForms is enabled via UseWindowsForms; no XAML / WPF dependency.
+    -->
+    <TargetFramework>net48</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <LangVersion>10</LangVersion>
+    <AssemblyName>ObscurizeGUI</AssemblyName>
+    <RootNamespace>Obscurize</RootNamespace>
+    <!-- Icon rendered programmatically by TrayIconRenderer – no .ico file needed -->
+    <!-- Require elevation – the GUI must write to HKLM and talk to LocalSystem -->
+    <ApplicationManifest>Properties\app.manifest</ApplicationManifest>
+    <PlatformTarget>AnyCPU</PlatformTarget>
+    <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <!-- Link the shared constants file directly rather than a separate assembly -->
+  <ItemGroup>
+    <Compile Include="..\ObscurizeShared\ObscurizeConst.cs" Link="ObscurizeConst.cs" />
+  </ItemGroup>
+
+</Project>

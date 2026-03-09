@@ -1,0 +1,23 @@
+// ============================================================
+//  ObscurizeService.rc  –  Resource definitions
+//
+//  The Agent DLLs are embedded as RCDATA resources so the
+//  service EXE is fully self-contained.
+//
+//  Build order:
+//    1.  Build ObscurizeAgent-x86.dll  →  output/ObscurizeAgent32.dll
+//    2.  Build ObscurizeAgent-x64.dll  →  output/ObscurizeAgent64.dll
+//    3.  Build ObscurizeService.exe    (this RC links the DLLs in)
+//
+//  Resource IDs match IDR_AGENT_DLL32 / IDR_AGENT_DLL64
+//  defined in ServiceMain.h.
+// ============================================================
+
+#include <Windows.h>
+#include "ServiceMain.h"
+
+// 32-bit Agent DLL
+IDR_AGENT_DLL32  RCDATA  "..\\output\\ObscurizeAgent32.dll"
+
+// 64-bit Agent DLL
+IDR_AGENT_DLL64  RCDATA  "..\\output\\ObscurizeAgent64.dll"
