@@ -1,6 +1,7 @@
 #include "Config.h"
 #include "../ObscurizeShared/ObscurizeDef.h"
 #include <Shlwapi.h>
+#include <strsafe.h>
 
 // ============================================================
 //  ObscurizeAgent – Config.c

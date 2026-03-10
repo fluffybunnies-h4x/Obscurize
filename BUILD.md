@@ -4,16 +4,16 @@
 
 | Requirement | Version | Notes |
 |---|---|---|
-| Visual Studio 2022 | 17.x | Community edition is sufficient |
-| MSVC v143 toolset | (VS installer) | C/C++ development workload |
+| Visual Studio 2026 | 19.x | Community edition is sufficient |
+| MSVC v145 toolset | (VS installer) | C/C++ development workload |
 | Windows 10 SDK | 10.0.x | Any recent SDK build |
 | .NET Framework 4.8 Targeting Pack | (VS installer) | For ObscurizeGUI |
 | .NET SDK 6+ | (for `dotnet build`) | Only needed if building CLI-style |
 
 ### Verify toolset selection
-The projects use `<PlatformToolset>v145</PlatformToolset>` (VS 2022).
-If you see "v143 toolset not found" errors, open each `.vcxproj` in a text
-editor and change `v145` → `v143`.
+The projects use `<PlatformToolset>v145</PlatformToolset>` (VS 2026).
+If you see "v145 toolset not found" errors, install the **MSVC v145** build
+tools via the VS installer (C++ workload → Individual components).
 
 ---
 
@@ -80,7 +80,7 @@ Solution** (Ctrl+Shift+B) in Release mode will follow the correct sequence.
 
 ---
 
-## Building with Visual Studio 2022 (Recommended)
+## Building with Visual Studio 2026 (Recommended)
 
 1. Open `Obscurize.sln`.
 2. In the Configuration drop-down select **Release** / **Any CPU** (the
@@ -92,7 +92,7 @@ Solution** (Ctrl+Shift+B) in Release mode will follow the correct sequence.
 
 ## Building from the Command Line (MSBuild)
 
-Open a **x64 Native Tools Command Prompt for VS 2022** (from the Start menu).
+Open a **x64 Native Tools Command Prompt for VS 2026** (from the Start menu).
 
 ```cmd
 cd /d C:\Users\groot\Documents\Null-Sec\Obscurize

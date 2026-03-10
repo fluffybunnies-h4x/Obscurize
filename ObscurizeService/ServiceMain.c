@@ -275,12 +275,6 @@ VOID ObsControlCallback(DWORD controlCode, HANDLE pipe)
             break;
         }
 
-        // ---- Service stop (from GUI) ----
-        case OBS_CTRL_DISABLE:
-        {
-            // Already handled above; fall through here is intentional.
-            break;
-        }
     }
 }
 

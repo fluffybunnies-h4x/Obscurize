@@ -51,6 +51,7 @@
       <CompileAs>CompileAsC</CompileAs>
       <AdditionalIncludeDirectories>
         $(SolutionDir)ObscurizeShared;
+        $(SolutionDir)ObscurizeAgent;
         $(SolutionDir)r77-rootkit\r77-rootkit-master\r77api;
         %(AdditionalIncludeDirectories)
       </AdditionalIncludeDirectories>
@@ -74,7 +75,12 @@
     <ClCompile Include="ProcessListener.c" />
     <ClCompile Include="ControlPipeListener.c" />
     <ClCompile Include="ArtefactManager.c" />
+    <!-- Spoof.c provides InstallDefensiveRegistryArtefacts / RemoveDefensiveRegistryArtefacts -->
+    <ClCompile Include="..\ObscurizeAgent\Spoof.c" />
     <!-- r77api sources used by service (injection, process enum, pipe helpers) -->
+    <ClCompile Include="..\r77-rootkit\r77-rootkit-master\r77api\r77header.c" />
+    <ClCompile Include="..\r77-rootkit\r77-rootkit-master\r77api\r77win.c" />
+    <ClCompile Include="..\r77-rootkit\r77-rootkit-master\r77api\r77process.c" />
     <ClCompile Include="..\r77-rootkit\r77-rootkit-master\r77api\peb.c" />
     <ClCompile Include="..\r77-rootkit\r77-rootkit-master\r77api\clist.c" />
   </ItemGroup>

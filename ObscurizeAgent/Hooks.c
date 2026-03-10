@@ -1,3 +1,10 @@
+// winsock2.h MUST come before Windows.h / Hooks.h.
+// <iptypes.h> (pulled by iphlpapi.h) needs ws2def.h structs for
+// IP_ADAPTER_ADDRESSES.  Including winsock2.h first sets _WINSOCK2API_
+// so that Windows.h skips the incompatible winsock.h (v1).
+#include <winsock2.h>
+#include <ws2tcpip.h>
+
 #include "Hooks.h"
 #include "Config.h"
 #include "Spoof.h"
@@ -11,10 +18,34 @@
 
 #include <Windows.h>
 #include <winternl.h>
+// winreg.h defines PKEY_VALUE_PARTIAL_INFORMATION / PKEY_VALUE_FULL_INFORMATION.
+// Include explicitly in case winternl.h's partial type definitions block the
+// automatic inclusion that Windows.h would otherwise perform.
+#include <winreg.h>
 #include <iphlpapi.h>
 #include <Shlwapi.h>
 #include <strsafe.h>
 #include <wchar.h>
+
+// NTSTATUS constants not provided by Windows.h without <ntstatus.h>.
+// Define only what HookedNtQueryValueKey needs; guards prevent redefinition.
+#ifndef STATUS_SUCCESS
+#define STATUS_SUCCESS          ((NTSTATUS)0x00000000L)
+#endif
+#ifndef STATUS_BUFFER_TOO_SMALL
+#define STATUS_BUFFER_TOO_SMALL ((NTSTATUS)0xC0000023L)
+#endif
+
+// KEY_VALUE_PARTIAL_INFORMATION is defined in winnt.h but may be suppressed
+// by the winternl.h include guard interaction.  Define it locally to guarantee
+// availability.  r77's ntdll.h already provides NT_KEY_VALUE_FULL_INFORMATION /
+// PNT_KEY_VALUE_FULL_INFORMATION so we reuse those for the full-info path.
+typedef struct _OBS_KEY_VALUE_PARTIAL_INFORMATION {
+    ULONG TitleIndex;
+    ULONG Type;
+    ULONG DataLength;
+    UCHAR Data[1];
+} OBS_KEY_VALUE_PARTIAL_INFORMATION, *POBS_KEY_VALUE_PARTIAL_INFORMATION;
 
 // ============================================================
 //  ObscurizeAgent – Hooks.c
@@ -45,15 +76,18 @@
 
 // ============================================================
 //  NT native function typedefs not in r77's ntdll.h
+//  NT_KEY_VALUE_INFORMATION_CLASS is r77's own enum (same values
+//  as the SDK KEY_VALUE_INFORMATION_CLASS) and is always defined
+//  via ntdll.h above – no winreg.h dependency in the typedef.
 // ============================================================
 
 typedef NTSTATUS (NTAPI *NT_NTQUERYVALUEKEY)(
-    HANDLE                      KeyHandle,
-    PUNICODE_STRING             ValueName,
-    KEY_VALUE_INFORMATION_CLASS KeyValueInformationClass,
-    PVOID                       KeyValueInformation,
-    ULONG                       Length,
-    PULONG                      ResultLength);
+    HANDLE                         KeyHandle,
+    PUNICODE_STRING                ValueName,
+    NT_KEY_VALUE_INFORMATION_CLASS KeyValueInformationClass,
+    PVOID                          KeyValueInformation,
+    ULONG                          Length,
+    PULONG                         ResultLength);
 
 // ============================================================
 //  Original function pointers
@@ -119,6 +153,28 @@ static VOID UnicodeStringToBuffer(PUNICODE_STRING us, PWCHAR buf, SIZE_T bufCch)
     if (copyChars >= bufCch) copyChars = bufCch - 1;
     CopyMemory(buf, us->Buffer, copyChars * sizeof(WCHAR));
     buf[copyChars] = L'\0';
+}
+
+// Resolve the full NT path of an open registry key handle.
+// Equivalent to r77api/r77win.c GetRegistryKeyName(), implemented inline
+// so we do not need to compile the entire r77win.c translation unit.
+// Must be called after OriginalNtQueryKey is resolved in InitializeHooks().
+static BOOL GetRegistryKeyNameLocal(HANDLE key, PWCHAR name, DWORD nameCch)
+{
+    if (!OriginalNtQueryKey || !name || nameCch == 0) return FALSE;
+
+    BYTE   buf[1024];
+    ULONG  resultLen = 0;
+    NTSTATUS st = OriginalNtQueryKey(key, KeyNameInformation,
+                                     buf, sizeof(buf), &resultLen);
+    if (!NT_SUCCESS(st)) return FALSE;
+
+    PNT_KEY_NAME_INFORMATION info = (PNT_KEY_NAME_INFORMATION)buf;
+    ULONG copyChars = info->NameLength / sizeof(WCHAR);
+    if (copyChars >= nameCch) copyChars = nameCch - 1;
+    CopyMemory(name, info->Name, copyChars * sizeof(WCHAR));
+    name[copyChars] = L'\0';
+    return TRUE;
 }
 
 // ============================================================
@@ -473,12 +529,12 @@ static NTSTATUS NTAPI HookedNtQuerySystemInformation(
 //  able to write the keys directly.
 // ------------------------------------------------------------
 static NTSTATUS NTAPI HookedNtQueryValueKey(
-    HANDLE                      KeyHandle,
-    PUNICODE_STRING             ValueName,
-    KEY_VALUE_INFORMATION_CLASS KeyValueInformationClass,
-    PVOID                       KeyValueInformation,
-    ULONG                       Length,
-    PULONG                      ResultLength)
+    HANDLE                         KeyHandle,
+    PUNICODE_STRING                ValueName,
+    NT_KEY_VALUE_INFORMATION_CLASS KeyValueInformationClass,
+    PVOID                          KeyValueInformation,
+    ULONG                          Length,
+    PULONG                         ResultLength)
 {
     NTSTATUS status = OriginalNtQueryValueKey(KeyHandle, ValueName,
                                               KeyValueInformationClass,
@@ -493,8 +549,10 @@ static NTSTATUS NTAPI HookedNtQueryValueKey(
         return status;
 
     // Resolve the key name and check it's the BIOS key we care about.
+    // (Uses GetRegistryKeyNameLocal defined above, which calls NtQueryKey
+    //  via the already-resolved OriginalNtQueryKey pointer.)
     WCHAR keyPath[512] = { 0 };
-    if (!GetRegistryKeyName(KeyHandle, keyPath, 512)) return status;
+    if (!GetRegistryKeyNameLocal(KeyHandle, keyPath, 512)) return status;
 
     if (_wcsicmp(keyPath, OBS_NT_BIOS_PATH) != 0) return status;
 
@@ -511,22 +569,22 @@ static NTSTATUS NTAPI HookedNtQueryValueKey(
 
     if (KeyValueInformationClass == KeyValuePartialInformation)
     {
-        PKEY_VALUE_PARTIAL_INFORMATION info =
-            (PKEY_VALUE_PARTIAL_INFORMATION)KeyValueInformation;
+        POBS_KEY_VALUE_PARTIAL_INFORMATION info =
+            (POBS_KEY_VALUE_PARTIAL_INFORMATION)KeyValueInformation;
 
-        if (Length < FIELD_OFFSET(KEY_VALUE_PARTIAL_INFORMATION, Data) + dataLen)
+        if (Length < FIELD_OFFSET(OBS_KEY_VALUE_PARTIAL_INFORMATION, Data) + dataLen)
             return STATUS_BUFFER_TOO_SMALL;
 
-        info->Type    = REG_SZ;
+        info->Type       = REG_SZ;
         info->DataLength = dataLen;
         CopyMemory(info->Data, spoofed, dataLen);
         if (ResultLength) *ResultLength =
-            FIELD_OFFSET(KEY_VALUE_PARTIAL_INFORMATION, Data) + dataLen;
+            FIELD_OFFSET(OBS_KEY_VALUE_PARTIAL_INFORMATION, Data) + dataLen;
     }
     else  // KeyValueFullInformation
     {
-        PKEY_VALUE_FULL_INFORMATION info =
-            (PKEY_VALUE_FULL_INFORMATION)KeyValueInformation;
+        PNT_KEY_VALUE_FULL_INFORMATION info =
+            (PNT_KEY_VALUE_FULL_INFORMATION)KeyValueInformation;
 
         DWORD dataOffset = info->DataOffset;
         if (Length < dataOffset + dataLen)
@@ -566,11 +624,12 @@ static NTSTATUS NTAPI HookedNtEnumerateKey(
                                       KeyInformation, KeyInformationLength,
                                       ResultLength);
 
-    // Retrieve TLS cache for O(N) sequential enumeration
-    HANDLE cacheKey   = (HANDLE)TlsGetValue(TlsEnumKeyCacheKey);
-    ULONG  cacheIndex = (ULONG) TlsGetValue(TlsEnumKeyCacheIndex);
-    ULONG  cacheI     = (ULONG) TlsGetValue(TlsEnumKeyCacheI);
-    ULONG  cacheCorrectedIndex = (ULONG)TlsGetValue(TlsEnumKeyCacheCorrectedIndex);
+    // Retrieve TLS cache for O(N) sequential enumeration.
+    // Cast via ULONG_PTR to suppress C4311 pointer-truncation warning.
+    HANDLE cacheKey            = (HANDLE)                    TlsGetValue(TlsEnumKeyCacheKey);
+    ULONG  cacheIndex          = (ULONG)(ULONG_PTR)          TlsGetValue(TlsEnumKeyCacheIndex);
+    ULONG  cacheI              = (ULONG)(ULONG_PTR)          TlsGetValue(TlsEnumKeyCacheI);
+    ULONG  cacheCorrectedIndex = (ULONG)(ULONG_PTR)          TlsGetValue(TlsEnumKeyCacheCorrectedIndex);
 
     ULONG i = 0, correctedIndex = 0;
     if (cacheKey == Key && cacheIndex == Index - 1)

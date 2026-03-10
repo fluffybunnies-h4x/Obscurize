@@ -143,8 +143,8 @@ r77's `SlnBin/` directory.
 | Requirement | Notes |
 |---|---|
 | Windows 10 / 11 x64 | Target platform |
-| Visual Studio 2022 | C/C++ and .NET workloads |
-| MSVC v143 toolset | Included with VS2022 |
+| Visual Studio 2026 | C/C++ and .NET workloads |
+| MSVC v145 toolset | Included with VS 2026 |
 | Windows 10 SDK | Any recent build |
 | .NET Framework 4.8 Targeting Pack | Ships with Windows 10/11; VS installer option |
 
@@ -152,7 +152,7 @@ r77's `SlnBin/` directory.
 
 ## Building
 
-Open `Obscurize.sln` in Visual Studio 2022, set the configuration to
+Open `Obscurize.sln` in Visual Studio 2026, set the configuration to
 **Release**, and press **Ctrl+Shift+B**.
 
 The solution enforces the correct build order via project dependencies:
@@ -166,7 +166,7 @@ ObscurizeGUI        →  output\ObscurizeGUI.exe
 
 ### Command-line build
 
-From an **x64 Native Tools Command Prompt for VS 2022**:
+From an **x64 Native Tools Command Prompt for VS 2026**:
 
 ```cmd
 cd /d C:\path\to\Obscurize
