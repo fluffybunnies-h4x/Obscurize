@@ -20,7 +20,7 @@ service stops.
 ## Threat Model & Background
 
 Modern malware routinely performs environment checks before executing its
-payload. The DEADVAX campaign (Securonix, 2024) is a documented example:
+payload. The DEAD#VAX campaign (Securonix, 2026) is a documented example:
 it inspects the current username, available RAM, MAC address OUI, WMI BIOS
 strings, and the presence of VMware / VirtualBox registry keys and artifact
 files before proceeding. If the host looks like a sandbox, the malware exits
