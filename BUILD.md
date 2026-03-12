@@ -8,7 +8,6 @@
 | MSVC v145 toolset | (VS installer) | C/C++ development workload |
 | Windows 10 SDK | 10.0.x | Any recent SDK build |
 | .NET Framework 4.8 Targeting Pack | (VS installer) | For ObscurizeGUI |
-| .NET SDK 6+ | (for `dotnet build`) | Only needed if building CLI-style |
 
 ### Verify toolset selection
 The projects use `<PlatformToolset>v145</PlatformToolset>` (VS 2026).
@@ -31,8 +30,9 @@ Obscurize/
 ├── ObscurizeAgent/                ← Injected DLL (x86 + x64)
 │   ├── Agent.c / .h
 │   ├── Config.c / .h
-│   ├── Hooks.c / .h
-│   ├── Spoof.c / .h
+│   ├── Hooks.c / .h               ← 20 Detours API hooks
+│   ├── Spoof.c / .h               ← Lookup tables, artefact install/remove
+│   ├── SmbiosSpoof.c / .h         ← Raw SMBIOS (RSMB) table patching
 │   ├── ObscurizeAgent-x86.vcxproj ← builds ObscurizeAgent32.dll → output\
 │   └── ObscurizeAgent-x64.vcxproj ← builds ObscurizeAgent64.dll → output\
 │
@@ -248,13 +248,13 @@ contain `0x4253` (OBS_AGENT_SIGNATURE) after injection.
 
 | Code | Hex | Action |
 |---|---|---|
-| `OBS_CTRL_ENABLE`            | 0x0B01 | Enable spoofing |
-| `OBS_CTRL_DISABLE`           | 0x0B02 | Disable spoofing |
-| `OBS_CTRL_SET_MODE_DEFENSIVE`| 0x0B03 | Switch to Defensive mode |
-| `OBS_CTRL_SET_MODE_TRAP`     | 0x0B04 | Switch to Trap mode |
-| `OBS_CTRL_QUERY_STATUS`      | 0x0B05 | Query current status (returns DWORD) |
-| `OBS_CTRL_INJECT_ALL`        | 0x0B06 | Force inject agent into all processes |
-| `OBS_CTRL_DETACH_ALL`        | 0x0B07 | Detach agent from all processes |
+| `OBS_CTRL_ENABLE`            | 0x0001 | Enable spoofing |
+| `OBS_CTRL_DISABLE`           | 0x0002 | Disable spoofing |
+| `OBS_CTRL_SET_MODE_DEFENSIVE`| 0x0003 | Switch to Defensive mode |
+| `OBS_CTRL_SET_MODE_TRAP`     | 0x0004 | Switch to Trap mode |
+| `OBS_CTRL_QUERY_STATUS`      | 0x0005 | Query current status (returns DWORD) |
+| `OBS_CTRL_INJECT_ALL`        | 0x0006 | Force inject agent into all processes |
+| `OBS_CTRL_DETACH_ALL`        | 0x0007 | Detach agent from all processes |
 
 These can be sent manually with any named-pipe client for testing.
 
@@ -278,14 +278,25 @@ These can be sent manually with any named-pipe client for testing.
                │ Reflective DLL injection (r77api InjectDll)
 ┌──────────────▼──────────────────────────────────────────────────┐
 │  ObscurizeAgent32/64.dll  (injected into every user process)    │
-│  • Detours hooks on Win32 + NT APIs                             │
+│  • 20 Detours hooks on Win32 + NT APIs                          │
 │  • Reads config from registry every 1 s                         │
 │                                                                  │
-│  Defensive mode hooks:          Trap mode hooks:                │
-│  GetUserNameW → "admin"         GetUserNameW → real user        │
-│  GlobalMemoryStatusEx → 2 GB   GlobalMemoryStatusEx → 16 GB    │
-│  NtQueryValueKey → VMware BIOS  NtQueryValueKey → Dell BIOS    │
-│  EnumServicesStatusEx → pass    EnumServicesStatusEx → filter  │
-│  NtQuerySystemInfo → pass       NtQuerySystemInfo → filter VM  │
+│  Both modes:                                                     │
+│  GetUserNameW/A            → mode-appropriate username          │
+│  GetComputerNameExW/A      → mode-appropriate computer name     │
+│  GlobalMemoryStatusEx      → 2 GB (Defensive) / 16 GB (Trap)   │
+│  EnumDisplaySettingsW      → 800×600 (Def) / 1920×1080 (Trap)  │
+│  GetAdaptersAddresses/Info → VMware OUI (Def) / Intel (Trap)   │
+│  NtQueryValueKey           → VMware BIOS (Def) / Dell (Trap)   │
+│  GetSystemFirmwareTable    → VMware RSMB (Def) / Dell (Trap)   │
+│  CreateProcessW/A          → strips -NoProfile from PS spawns  │
+│                                                                  │
+│  Trap mode only:                                                 │
+│  EnumServicesStatusExW/A   → filters VM service names           │
+│  NtQuerySystemInformation  → filters VM process names           │
+│  NtEnumerateKey/NtQueryKey → filters VM vendor registry keys    │
+│                                                                  │
+│  systeminfo.exe only (Trap mode):                               │
+│  WriteFile / WriteConsoleA/W → patches stdout VM→Dell strings  │
 └─────────────────────────────────────────────────────────────────┘
 ```
