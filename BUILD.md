@@ -4,7 +4,7 @@
 
 | Requirement | Version | Notes |
 |---|---|---|
-| Visual Studio 2026 | 19.x | Community edition is sufficient |
+| Visual Studio 2026 | 18.x | Community edition is sufficient |
 | MSVC v145 toolset | (VS installer) | C/C++ development workload |
 | Windows 10 SDK | 10.0.x | Any recent SDK build |
 | .NET Framework 4.8 Targeting Pack | (VS installer) | For ObscurizeGUI |

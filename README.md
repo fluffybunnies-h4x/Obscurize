@@ -260,16 +260,16 @@ From a Developer Command Prompt or using `devenv.com`:
 cd /d C:\path\to\Obscurize
 mkdir output 2>nul
 
-"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\devenv.com" ^
+"C:\Program Files\Microsoft Visual Studio\18\Community\Common7\IDE\devenv.com" ^
     Obscurize.sln /Build "Release|Win32" /Project ObscurizeAgent
 
-"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\devenv.com" ^
+"C:\Program Files\Microsoft Visual Studio\18\Community\Common7\IDE\devenv.com" ^
     Obscurize.sln /Build "Release|x64" /Project ObscurizeAgent
 
-"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\devenv.com" ^
+"C:\Program Files\Microsoft Visual Studio\18\Community\Common7\IDE\devenv.com" ^
     Obscurize.sln /Build "Release|x64" /Project ObscurizeService
 
-"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\devenv.com" ^
+"C:\Program Files\Microsoft Visual Studio\18\Community\Common7\IDE\devenv.com" ^
     Obscurize.sln /Build "Release|x64" /Project ObscurizeGUI
 ```
 
