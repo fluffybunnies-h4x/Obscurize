@@ -520,7 +520,7 @@ namespace Obscurize
             _defensiveValue = defensiveValue;
             _trapValue      = trapValue;
             SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint
-                   | ControlStyles.OptimizedDoubleBuffer, true);
+                   | ControlStyles.OptimizedDoubleBuffer | ControlStyles.SupportsTransparentBackColor, true);
             BackColor = Color.Transparent;
         }
 

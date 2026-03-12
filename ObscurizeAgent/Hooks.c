@@ -8,6 +8,7 @@
 #include "Hooks.h"
 #include "Config.h"
 #include "Spoof.h"
+#include "SmbiosSpoof.h"
 #include "../ObscurizeShared/ObscurizeDef.h"
 
 // r77api headers – include by relative path to the submodule
@@ -26,6 +27,7 @@
 #include <Shlwapi.h>
 #include <strsafe.h>
 #include <wchar.h>
+#include <string.h>
 
 // NTSTATUS constants not provided by Windows.h without <ntstatus.h>.
 // Define only what HookedNtQueryValueKey needs; guards prevent redefinition.
@@ -126,6 +128,31 @@ static NT_NTQUERYSYSTEMINFORMATION  OriginalNtQuerySystemInformation  = NULL;
 static NT_NTENUMERATEKEY            OriginalNtEnumerateKey            = NULL;
 static NT_NTQUERYKEY                OriginalNtQueryKey                = NULL;
 static NT_NTQUERYVALUEKEY           OriginalNtQueryValueKey           = NULL;
+
+// kernel32 – SMBIOS firmware table
+static UINT (WINAPI *OriginalGetSystemFirmwareTable)(DWORD, DWORD, PVOID, DWORD) = NULL;
+
+// kernel32 – process creation
+static BOOL (WINAPI *OriginalCreateProcessW)(LPCWSTR, LPWSTR,
+    LPSECURITY_ATTRIBUTES, LPSECURITY_ATTRIBUTES, BOOL, DWORD,
+    LPVOID, LPCWSTR, LPSTARTUPINFOW, LPPROCESS_INFORMATION)          = NULL;
+static BOOL (WINAPI *OriginalCreateProcessA)(LPCSTR, LPSTR,
+    LPSECURITY_ATTRIBUTES, LPSECURITY_ATTRIBUTES, BOOL, DWORD,
+    LPVOID, LPCSTR, LPSTARTUPINFOA, LPPROCESS_INFORMATION)           = NULL;
+
+// kernelbase – systeminfo.exe stdout patching (only installed in systeminfo.exe)
+// Resolved from kernelbase.dll (actual implementation) not kernel32 forwarding stubs,
+// and WriteConsoleW added to handle ConPTY / Windows Terminal paths.
+static BOOL (WINAPI *OriginalWriteFile)(
+    HANDLE, LPCVOID, DWORD, LPDWORD, LPOVERLAPPED)                   = NULL;
+static BOOL (WINAPI *OriginalWriteConsoleA)(
+    HANDLE, const VOID *, DWORD, LPDWORD, LPVOID)                    = NULL;
+static BOOL (WINAPI *OriginalWriteConsoleW)(
+    HANDLE, const VOID *, DWORD, LPDWORD, LPVOID)                    = NULL;
+
+// Set once at InitializeHooks time – TRUE only when injected into systeminfo.exe
+static BOOL   g_IsSystemInfo  = FALSE;
+static HANDLE g_StdoutHandle  = INVALID_HANDLE_VALUE;
 
 // TLS slots for NtEnumerateKey O(N) cache (same pattern as r77)
 static DWORD TlsEnumKeyCacheKey;
@@ -624,6 +651,20 @@ static NTSTATUS NTAPI HookedNtEnumerateKey(
                                       KeyInformation, KeyInformationLength,
                                       ResultLength);
 
+    // VM vendor keys (VMware, Inc. / Oracle / VBOX) are direct children of
+    // HKLM\SOFTWARE only.  Applying the filter to any other key causes
+    // STATUS_NO_MORE_ENTRIES to be returned unexpectedly during PowerShell /
+    // CLR / .NET initialization, producing "No more data is available." errors
+    // and preventing shell startup.  Pass through all other keys immediately.
+    WCHAR keyPath[512] = { 0 };
+    if (!GetRegistryKeyNameLocal(Key, keyPath, 512) ||
+        _wcsicmp(keyPath, L"\\REGISTRY\\MACHINE\\SOFTWARE") != 0)
+    {
+        return OriginalNtEnumerateKey(Key, Index, KeyInformationClass,
+                                      KeyInformation, KeyInformationLength,
+                                      ResultLength);
+    }
+
     // Retrieve TLS cache for O(N) sequential enumeration.
     // Cast via ULONG_PTR to suppress C4311 pointer-truncation warning.
     HANDLE cacheKey            = (HANDLE)                    TlsGetValue(TlsEnumKeyCacheKey);
@@ -664,7 +705,7 @@ static NTSTATUS NTAPI HookedNtEnumerateKey(
     // Update TLS cache.
     TlsSetValue(TlsEnumKeyCacheKey,            Key);
     TlsSetValue(TlsEnumKeyCacheIndex,          (LPVOID)(ULONG_PTR)Index);
-    TlsSetValue(TlsEnumKeyCacheI,              (LPVOID)(ULONG_PTR)(i - 1));
+    TlsSetValue(TlsEnumKeyCacheI,              (LPVOID)(ULONG_PTR)i);   // Save i, not i-1
     TlsSetValue(TlsEnumKeyCacheCorrectedIndex, (LPVOID)(ULONG_PTR)(correctedIndex - 1));
 
     return OriginalNtEnumerateKey(Key, correctedIndex - 1, KeyInformationClass,
@@ -686,6 +727,13 @@ static NTSTATUS NTAPI HookedNtQueryKey(
 
     if (KeyInformationClass != KeyFullInformation &&
         KeyInformationClass != KeyCachedInformation)
+        return status;
+
+    // Only correct the SubKeys count for HKLM\SOFTWARE — the only key where
+    // VM vendor subkeys exist as direct children.
+    WCHAR keyPath[512] = { 0 };
+    if (!GetRegistryKeyNameLocal(Key, keyPath, 512) ||
+        _wcsicmp(keyPath, L"\\REGISTRY\\MACHINE\\SOFTWARE") != 0)
         return status;
 
     // Count how many subkeys are VM vendor keys so we can correct the count.
@@ -713,6 +761,503 @@ static NTSTATUS NTAPI HookedNtQueryKey(
         ((PNT_KEY_CACHED_INFORMATION)KeyInformation)->SubKeys -= hiddenSubKeys;
 
     return status;
+}
+
+// ------------------------------------------------------------
+//  GetSystemFirmwareTable
+//  Intercept raw SMBIOS table reads used by WMI providers to
+//  serve Win32_ComputerSystem.Manufacturer, Win32_BIOS, etc.
+//
+//  The function is called in two patterns:
+//    1. Probe: BufferSize = 0  →  returns required byte count.
+//    2. Fill:  BufferSize > 0  →  writes data, returns bytes written.
+//
+//  We inflate the probe result by OBS_SMBIOS_HEADROOM so the
+//  caller allocates enough room for our patched (potentially
+//  slightly larger) strings, then patch the filled buffer
+//  in-place on the second call.
+// ------------------------------------------------------------
+static UINT WINAPI HookedGetSystemFirmwareTable(
+    DWORD FirmwareTableProviderSignature,
+    DWORD FirmwareTableID,
+    PVOID pFirmwareTableBuffer,
+    DWORD BufferSize)
+{
+    UINT result = OriginalGetSystemFirmwareTable(
+        FirmwareTableProviderSignature, FirmwareTableID,
+        pFirmwareTableBuffer, BufferSize);
+
+    if (!ObsIsEnabled()) return result;
+
+    // Only intercept Raw SMBIOS ('RSMB') provider, table ID 0.
+    if (FirmwareTableProviderSignature != (DWORD)'RSMB' || FirmwareTableID != 0)
+        return result;
+
+    if (result == 0) return result;     // API failure – nothing to patch.
+
+    // Probe call: buffer too small or not provided.
+    // Inflate the returned size so callers allocate enough headroom.
+    if (result > BufferSize)
+        return result + OBS_SMBIOS_HEADROOM;
+
+    // Fill call: data was written to pFirmwareTableBuffer.
+    DWORD  patchedSize = 0;
+    LPBYTE patched = PatchRSMBBuffer((LPCBYTE)pFirmwareTableBuffer,
+                                     result, &patchedSize);
+    if (patched)
+    {
+        if (patchedSize <= BufferSize)
+        {
+            CopyMemory(pFirmwareTableBuffer, patched, patchedSize);
+            result = patchedSize;
+        }
+        HeapFree(GetProcessHeap(), 0, patched);
+    }
+    return result;
+}
+
+// ------------------------------------------------------------
+//  CreateProcessW / CreateProcessA
+//  Strip -NoProfile (and any case-insensitive prefix abbreviation
+//  of "noprofile" with at least 3 body chars: -nop, -nopr, …,
+//  -noprofile) from PowerShell command lines so the system-wide
+//  profile.ps1 is always loaded, even when the spawning process
+//  passes -NoProfile explicitly.
+// ------------------------------------------------------------
+
+// Strip -noprofile / /noprofile (and prefix abbreviations >= 3 body chars)
+// from a mutable wide command-line string, in-place.
+// Inter-token whitespace before a stripped token is also removed.
+// Returns TRUE if at least one token was removed.
+static BOOL StripNoProfFlag(LPWSTR cmd)
+{
+    if (!cmd) return FALSE;
+    static const WCHAR kTarget[] = L"noprofile";   // 9 chars
+
+    BOOL   stripped = FALSE;
+    LPWSTR w = cmd;   // write pointer
+    LPWSTR r = cmd;   // read pointer
+
+    while (*r)
+    {
+        // Collect inter-token whitespace; associate it with the NEXT token.
+        LPWSTR wsStart = r;
+        while (*r == L' ' || *r == L'\t') r++;
+        SIZE_T wsLen = (SIZE_T)(r - wsStart);
+
+        if (!*r)
+        {
+            // Trailing whitespace – preserve it.
+            MoveMemory(w, wsStart, wsLen * sizeof(WCHAR));
+            w += wsLen;
+            break;
+        }
+
+        // Collect the token (non-whitespace run).
+        LPWSTR tokStart = r;
+        while (*r && *r != L' ' && *r != L'\t') r++;
+        SIZE_T tokLen = (SIZE_T)(r - tokStart);
+
+        // Check for -/noprofile prefix (body must be 3–9 chars).
+        BOOL isNoProf = FALSE;
+        if (tokLen >= 4 && (tokStart[0] == L'-' || tokStart[0] == L'/'))
+        {
+            SIZE_T bodyLen = tokLen - 1;
+            if (bodyLen >= 3 && bodyLen <= 9 &&
+                _wcsnicmp(tokStart + 1, kTarget, bodyLen) == 0)
+                isNoProf = TRUE;
+        }
+
+        if (isNoProf)
+        {
+            stripped = TRUE;
+            // Skip preceding whitespace and this token (copy nothing).
+        }
+        else
+        {
+            MoveMemory(w, wsStart, wsLen * sizeof(WCHAR));
+            w += wsLen;
+            MoveMemory(w, tokStart, tokLen * sizeof(WCHAR));
+            w += tokLen;
+        }
+    }
+
+    *w = L'\0';
+    return stripped;
+}
+
+static BOOL WINAPI HookedCreateProcessW(
+    LPCWSTR               lpApplicationName,
+    LPWSTR                lpCommandLine,
+    LPSECURITY_ATTRIBUTES lpProcessAttributes,
+    LPSECURITY_ATTRIBUTES lpThreadAttributes,
+    BOOL                  bInheritHandles,
+    DWORD                 dwCreationFlags,
+    LPVOID                lpEnvironment,
+    LPCWSTR               lpCurrentDirectory,
+    LPSTARTUPINFOW        lpStartupInfo,
+    LPPROCESS_INFORMATION lpProcessInformation)
+{
+    LPWSTR modifiedCmd = NULL;
+    LPWSTR cmdToUse    = lpCommandLine;
+    BOOL   result;
+
+    if (ObsIsEnabled() && lpCommandLine)
+    {
+        BOOL isPs = (StrStrIW(lpCommandLine, L"powershell") != NULL ||
+                     StrStrIW(lpCommandLine, L"pwsh")       != NULL);
+        if (!isPs && lpApplicationName)
+            isPs = (StrStrIW(lpApplicationName, L"powershell") != NULL ||
+                    StrStrIW(lpApplicationName, L"pwsh")       != NULL);
+
+        if (isPs)
+        {
+            SIZE_T cch = wcslen(lpCommandLine) + 1;
+            modifiedCmd = (LPWSTR)HeapAlloc(GetProcessHeap(), 0, cch * sizeof(WCHAR));
+            if (modifiedCmd)
+            {
+                CopyMemory(modifiedCmd, lpCommandLine, cch * sizeof(WCHAR));
+                if (StripNoProfFlag(modifiedCmd))
+                    cmdToUse = modifiedCmd;
+                else
+                {
+                    HeapFree(GetProcessHeap(), 0, modifiedCmd);
+                    modifiedCmd = NULL;
+                }
+            }
+        }
+    }
+
+    result = OriginalCreateProcessW(
+        lpApplicationName, cmdToUse,
+        lpProcessAttributes, lpThreadAttributes,
+        bInheritHandles, dwCreationFlags,
+        lpEnvironment, lpCurrentDirectory,
+        lpStartupInfo, lpProcessInformation);
+
+    if (modifiedCmd)
+        HeapFree(GetProcessHeap(), 0, modifiedCmd);
+
+    return result;
+}
+
+static BOOL WINAPI HookedCreateProcessA(
+    LPCSTR                lpApplicationName,
+    LPSTR                 lpCommandLine,
+    LPSECURITY_ATTRIBUTES lpProcessAttributes,
+    LPSECURITY_ATTRIBUTES lpThreadAttributes,
+    BOOL                  bInheritHandles,
+    DWORD                 dwCreationFlags,
+    LPVOID                lpEnvironment,
+    LPCSTR                lpCurrentDirectory,
+    LPSTARTUPINFOA        lpStartupInfo,
+    LPPROCESS_INFORMATION lpProcessInformation)
+{
+    LPSTR modifiedCmd = NULL;
+    LPSTR cmdToUse    = lpCommandLine;
+    BOOL  result;
+
+    if (ObsIsEnabled() && lpCommandLine)
+    {
+        BOOL isPs = (StrStrIA(lpCommandLine, "powershell") != NULL ||
+                     StrStrIA(lpCommandLine, "pwsh")       != NULL);
+        if (!isPs && lpApplicationName)
+            isPs = (StrStrIA(lpApplicationName, "powershell") != NULL ||
+                    StrStrIA(lpApplicationName, "pwsh")       != NULL);
+
+        if (isPs)
+        {
+            // Convert to wide for uniform StripNoProfFlag processing.
+            int    wCch    = MultiByteToWideChar(CP_ACP, 0, lpCommandLine, -1, NULL, 0);
+            LPWSTR wideCmd = (LPWSTR)HeapAlloc(GetProcessHeap(), 0,
+                                               (SIZE_T)wCch * sizeof(WCHAR));
+            if (wideCmd)
+            {
+                MultiByteToWideChar(CP_ACP, 0, lpCommandLine, -1, wideCmd, wCch);
+                if (StripNoProfFlag(wideCmd))
+                {
+                    int   mbLen = WideCharToMultiByte(CP_ACP, 0, wideCmd, -1,
+                                                     NULL, 0, NULL, NULL);
+                    modifiedCmd = (LPSTR)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)mbLen);
+                    if (modifiedCmd)
+                    {
+                        WideCharToMultiByte(CP_ACP, 0, wideCmd, -1,
+                                           modifiedCmd, mbLen, NULL, NULL);
+                        cmdToUse = modifiedCmd;
+                    }
+                }
+                HeapFree(GetProcessHeap(), 0, wideCmd);
+            }
+        }
+    }
+
+    result = OriginalCreateProcessA(
+        lpApplicationName, cmdToUse,
+        lpProcessAttributes, lpThreadAttributes,
+        bInheritHandles, dwCreationFlags,
+        lpEnvironment, lpCurrentDirectory,
+        lpStartupInfo, lpProcessInformation);
+
+    if (modifiedCmd)
+        HeapFree(GetProcessHeap(), 0, modifiedCmd);
+
+    return result;
+}
+
+// ------------------------------------------------------------
+//  WriteFile / WriteConsoleA – systeminfo.exe stdout patching
+//  Only active when injected into systeminfo.exe (g_IsSystemInfo).
+//  Intercepts the final formatted text output and replaces VM
+//  strings with Trap-mode real-hardware strings so a human
+//  attacker running systeminfo sees Dell values, not VMware.
+//
+//  Three patterns, applied in order (longest/most specific first
+//  to prevent partial clobber):
+//    "VMware, Inc. VMW" + rest of BIOS value  →  Dell BIOS ver
+//    "VMware20,1"                              →  "Precision 5560"
+//    "VMware, Inc."                            →  "Dell Inc."
+// ------------------------------------------------------------
+
+// Allocate and return a patched copy of [src, src+srcLen).
+// Sets *outLen to the length of the patched buffer.
+// Returns NULL if no VM strings were found (caller uses original).
+// Caller must HeapFree the returned pointer.
+static LPBYTE PatchSysInfoOutput(LPCBYTE src, DWORD srcLen, DWORD *outLen)
+{
+    static const char kBiosPfx[]   = "VMware, Inc. VMW";
+    static const char kBiosRepl[]  = "Dell Inc. 1.22.0, 04/14/2023";
+    static const char kModelFind[] = "VMware20,1";
+    static const char kModelRepl[] = "Precision 5560";
+    static const char kMfgFind[]   = "VMware, Inc.";
+    static const char kMfgRepl[]   = "Dell Inc.";
+
+    const DWORD kBiosPfxLen   = (DWORD)(sizeof(kBiosPfx)   - 1);
+    const DWORD kBiosReplLen  = (DWORD)(sizeof(kBiosRepl)   - 1);
+    const DWORD kModelFindLen = (DWORD)(sizeof(kModelFind)  - 1);
+    const DWORD kModelReplLen = (DWORD)(sizeof(kModelRepl)  - 1);
+    const DWORD kMfgFindLen   = (DWORD)(sizeof(kMfgFind)    - 1);
+    const DWORD kMfgReplLen   = (DWORD)(sizeof(kMfgRepl)    - 1);
+
+    // Replacements are all equal-length or shorter, +16 for any edge case.
+    DWORD  cap = srcLen + 16;
+    LPBYTE dst = (LPBYTE)HeapAlloc(GetProcessHeap(), 0, cap);
+    if (!dst) return NULL;
+
+    BOOL  changed = FALSE;
+    DWORD ri = 0, wi = 0;
+
+    while (ri < srcLen && wi < cap)
+    {
+        DWORD      rem = srcLen - ri;
+        LPCBYTE    p   = src + ri;
+
+        // Pattern 1: BIOS version prefix → replace value up to EOL
+        if (rem >= kBiosPfxLen &&
+            _strnicmp((const char *)p, kBiosPfx, kBiosPfxLen) == 0)
+        {
+            CopyMemory(dst + wi, kBiosRepl, kBiosReplLen);
+            wi += kBiosReplLen;
+            ri += kBiosPfxLen;
+            // Skip the rest of the original VMware BIOS version string
+            while (ri < srcLen && src[ri] != '\r' && src[ri] != '\n')
+                ri++;
+            changed = TRUE;
+            continue;
+        }
+
+        // Pattern 2: model string
+        if (rem >= kModelFindLen &&
+            _strnicmp((const char *)p, kModelFind, kModelFindLen) == 0)
+        {
+            CopyMemory(dst + wi, kModelRepl, kModelReplLen);
+            wi += kModelReplLen;
+            ri += kModelFindLen;
+            changed = TRUE;
+            continue;
+        }
+
+        // Pattern 3: manufacturer (must follow pattern 1 to avoid double-hit)
+        if (rem >= kMfgFindLen &&
+            _strnicmp((const char *)p, kMfgFind, kMfgFindLen) == 0)
+        {
+            CopyMemory(dst + wi, kMfgRepl, kMfgReplLen);
+            wi += kMfgReplLen;
+            ri += kMfgFindLen;
+            changed = TRUE;
+            continue;
+        }
+
+        dst[wi++] = src[ri++];
+    }
+
+    if (!changed)
+    {
+        HeapFree(GetProcessHeap(), 0, dst);
+        return NULL;
+    }
+
+    *outLen = wi;
+    return dst;
+}
+
+static BOOL WINAPI HookedWriteFile(
+    HANDLE       hFile,
+    LPCVOID      lpBuffer,
+    DWORD        nNumberOfBytesToWrite,
+    LPDWORD      lpNumberOfBytesWritten,
+    LPOVERLAPPED lpOverlapped)
+{
+    if (g_IsSystemInfo && ObsIsEnabled() && ObsGetMode() == OBS_MODE_TRAP &&
+        hFile == g_StdoutHandle && lpBuffer && nNumberOfBytesToWrite > 0)
+    {
+        DWORD  pLen = 0;
+        LPBYTE p    = PatchSysInfoOutput((LPCBYTE)lpBuffer, nNumberOfBytesToWrite, &pLen);
+        if (p)
+        {
+            BOOL r = OriginalWriteFile(hFile, p, pLen, lpNumberOfBytesWritten, lpOverlapped);
+            HeapFree(GetProcessHeap(), 0, p);
+            // Report original byte count so the caller never sees a short write
+            if (lpNumberOfBytesWritten) *lpNumberOfBytesWritten = nNumberOfBytesToWrite;
+            return r;
+        }
+    }
+    return OriginalWriteFile(hFile, lpBuffer, nNumberOfBytesToWrite,
+                             lpNumberOfBytesWritten, lpOverlapped);
+}
+
+static BOOL WINAPI HookedWriteConsoleA(
+    HANDLE      hConsoleOutput,
+    const VOID *lpBuffer,
+    DWORD       nNumberOfCharsToWrite,
+    LPDWORD     lpNumberOfCharsWritten,
+    LPVOID      lpReserved)
+{
+    if (g_IsSystemInfo && ObsIsEnabled() && ObsGetMode() == OBS_MODE_TRAP &&
+        hConsoleOutput == g_StdoutHandle && lpBuffer && nNumberOfCharsToWrite > 0)
+    {
+        DWORD  pLen = 0;
+        LPBYTE p    = PatchSysInfoOutput((LPCBYTE)lpBuffer, nNumberOfCharsToWrite, &pLen);
+        if (p)
+        {
+            BOOL r = OriginalWriteConsoleA(hConsoleOutput, p, pLen,
+                                           lpNumberOfCharsWritten, lpReserved);
+            HeapFree(GetProcessHeap(), 0, p);
+            if (lpNumberOfCharsWritten) *lpNumberOfCharsWritten = nNumberOfCharsToWrite;
+            return r;
+        }
+    }
+    return OriginalWriteConsoleA(hConsoleOutput, lpBuffer, nNumberOfCharsToWrite,
+                                 lpNumberOfCharsWritten, lpReserved);
+}
+
+// Wide-string (WriteConsoleW) variant of PatchSysInfoOutput.
+// Handles the ConPTY path on Windows 11 / Windows Terminal where
+// systeminfo's UCRT detects a console handle and calls WriteConsoleW.
+// Allocate and return a patched copy of [src, src+srcCch).
+// Sets *outCch to the character count of the patched buffer.
+// Returns NULL if no VM strings were found (caller uses original).
+// Caller must HeapFree the returned pointer.
+static LPWSTR PatchSysInfoOutputW(LPCWSTR src, DWORD srcCch, DWORD *outCch)
+{
+    static const WCHAR kBiosPfx[]   = L"VMware, Inc. VMW";
+    static const WCHAR kBiosRepl[]  = L"Dell Inc. 1.22.0, 04/14/2023";
+    static const WCHAR kModelFind[] = L"VMware20,1";
+    static const WCHAR kModelRepl[] = L"Precision 5560";
+    static const WCHAR kMfgFind[]   = L"VMware, Inc.";
+    static const WCHAR kMfgRepl[]   = L"Dell Inc.";
+
+    const DWORD kBiosPfxLen   = (DWORD)(ARRAYSIZE(kBiosPfx)   - 1);
+    const DWORD kBiosReplLen  = (DWORD)(ARRAYSIZE(kBiosRepl)   - 1);
+    const DWORD kModelFindLen = (DWORD)(ARRAYSIZE(kModelFind)  - 1);
+    const DWORD kModelReplLen = (DWORD)(ARRAYSIZE(kModelRepl)  - 1);
+    const DWORD kMfgFindLen   = (DWORD)(ARRAYSIZE(kMfgFind)    - 1);
+    const DWORD kMfgReplLen   = (DWORD)(ARRAYSIZE(kMfgRepl)    - 1);
+
+    // Replacements are all equal-length or shorter, +16 for any edge case.
+    DWORD  cap = srcCch + 16;
+    LPWSTR dst = (LPWSTR)HeapAlloc(GetProcessHeap(), 0, cap * sizeof(WCHAR));
+    if (!dst) return NULL;
+
+    BOOL  changed = FALSE;
+    DWORD ri = 0, wi = 0;
+
+    while (ri < srcCch && wi < cap)
+    {
+        DWORD   rem = srcCch - ri;
+        LPCWSTR p   = src + ri;
+
+        // Pattern 1: BIOS version prefix → replace value up to EOL
+        if (rem >= kBiosPfxLen &&
+            _wcsnicmp(p, kBiosPfx, kBiosPfxLen) == 0)
+        {
+            CopyMemory(dst + wi, kBiosRepl, kBiosReplLen * sizeof(WCHAR));
+            wi += kBiosReplLen;
+            ri += kBiosPfxLen;
+            // Skip the rest of the original VMware BIOS version string
+            while (ri < srcCch && src[ri] != L'\r' && src[ri] != L'\n')
+                ri++;
+            changed = TRUE;
+            continue;
+        }
+
+        // Pattern 2: model string
+        if (rem >= kModelFindLen &&
+            _wcsnicmp(p, kModelFind, kModelFindLen) == 0)
+        {
+            CopyMemory(dst + wi, kModelRepl, kModelReplLen * sizeof(WCHAR));
+            wi += kModelReplLen;
+            ri += kModelFindLen;
+            changed = TRUE;
+            continue;
+        }
+
+        // Pattern 3: manufacturer (must follow pattern 1 to avoid double-hit)
+        if (rem >= kMfgFindLen &&
+            _wcsnicmp(p, kMfgFind, kMfgFindLen) == 0)
+        {
+            CopyMemory(dst + wi, kMfgRepl, kMfgReplLen * sizeof(WCHAR));
+            wi += kMfgReplLen;
+            ri += kMfgFindLen;
+            changed = TRUE;
+            continue;
+        }
+
+        dst[wi++] = src[ri++];
+    }
+
+    if (!changed)
+    {
+        HeapFree(GetProcessHeap(), 0, dst);
+        return NULL;
+    }
+
+    *outCch = wi;
+    return dst;
+}
+
+static BOOL WINAPI HookedWriteConsoleW(
+    HANDLE      hConsoleOutput,
+    const VOID *lpBuffer,
+    DWORD       nNumberOfCharsToWrite,
+    LPDWORD     lpNumberOfCharsWritten,
+    LPVOID      lpReserved)
+{
+    if (g_IsSystemInfo && ObsIsEnabled() && ObsGetMode() == OBS_MODE_TRAP &&
+        hConsoleOutput == g_StdoutHandle && lpBuffer && nNumberOfCharsToWrite > 0)
+    {
+        DWORD  pCch = 0;
+        LPWSTR p    = PatchSysInfoOutputW((LPCWSTR)lpBuffer, nNumberOfCharsToWrite, &pCch);
+        if (p)
+        {
+            BOOL r = OriginalWriteConsoleW(hConsoleOutput, p, pCch,
+                                           lpNumberOfCharsWritten, lpReserved);
+            HeapFree(GetProcessHeap(), 0, p);
+            if (lpNumberOfCharsWritten) *lpNumberOfCharsWritten = nNumberOfCharsToWrite;
+            return r;
+        }
+    }
+    return OriginalWriteConsoleW(hConsoleOutput, lpBuffer, nNumberOfCharsToWrite,
+                                 lpNumberOfCharsWritten, lpReserved);
 }
 
 // ============================================================
@@ -743,6 +1288,27 @@ VOID InitializeHooks(VOID)
     TlsEnumKeyCacheI              = TlsAlloc();
     TlsEnumKeyCacheCorrectedIndex = TlsAlloc();
 
+    // Detect systeminfo.exe – only install WriteFile/WriteConsoleA hooks there
+    {
+        CHAR path[MAX_PATH] = { 0 };
+        GetModuleFileNameA(NULL, path, MAX_PATH);
+        CHAR *last = strrchr(path, '\\');
+        g_IsSystemInfo = (last != NULL && _stricmp(last + 1, "systeminfo.exe") == 0);
+        if (g_IsSystemInfo)
+        {
+            // Resolve from kernelbase.dll (actual implementation), not kernel32 forwarding
+            // stubs.  Modern executables (including systeminfo.exe) import WriteFile and
+            // WriteConsoleA/W directly from kernelbase via the ApiSet, so hooking the
+            // kernel32 stub would leave their IAT slot un-patched.
+            // WriteConsoleW is added to cover the ConPTY / Windows Terminal path where
+            // systeminfo's UCRT detects a console handle and calls WriteConsoleW (wide).
+            g_StdoutHandle        = GetStdHandle(STD_OUTPUT_HANDLE);
+            OriginalWriteFile     = (BOOL(WINAPI*)(HANDLE,LPCVOID,DWORD,LPDWORD,LPOVERLAPPED)) ResolveFunction("kernelbase.dll", "WriteFile");
+            OriginalWriteConsoleA = (BOOL(WINAPI*)(HANDLE,const VOID*,DWORD,LPDWORD,LPVOID))   ResolveFunction("kernelbase.dll", "WriteConsoleA");
+            OriginalWriteConsoleW = (BOOL(WINAPI*)(HANDLE,const VOID*,DWORD,LPDWORD,LPVOID))   ResolveFunction("kernelbase.dll", "WriteConsoleW");
+        }
+    }
+
     // Resolve originals
     OriginalGetUserNameW           = (BOOL  (WINAPI*)(LPWSTR,LPDWORD))               RESOLVE_ADV(GetUserNameW);
     OriginalGetUserNameA           = (BOOL  (WINAPI*)(LPSTR, LPDWORD))               RESOLVE_ADV(GetUserNameA);
@@ -758,6 +1324,9 @@ VOID InitializeHooks(VOID)
     OriginalNtEnumerateKey           = (NT_NTENUMERATEKEY)          RESOLVE_NTDLL(NtEnumerateKey);
     OriginalNtQueryKey               = (NT_NTQUERYKEY)              RESOLVE_NTDLL(NtQueryKey);
     OriginalNtQueryValueKey          = (NT_NTQUERYVALUEKEY)         RESOLVE_NTDLL(NtQueryValueKey);
+    OriginalGetSystemFirmwareTable   = (UINT(WINAPI*)(DWORD,DWORD,PVOID,DWORD)) RESOLVE_K32(GetSystemFirmwareTable);
+    OriginalCreateProcessW           = (BOOL(WINAPI*)(LPCWSTR,LPWSTR,LPSECURITY_ATTRIBUTES,LPSECURITY_ATTRIBUTES,BOOL,DWORD,LPVOID,LPCWSTR,LPSTARTUPINFOW,LPPROCESS_INFORMATION)) RESOLVE_K32(CreateProcessW);
+    OriginalCreateProcessA           = (BOOL(WINAPI*)(LPCSTR,LPSTR,LPSECURITY_ATTRIBUTES,LPSECURITY_ATTRIBUTES,BOOL,DWORD,LPVOID,LPCSTR,LPSTARTUPINFOA,LPPROCESS_INFORMATION))  RESOLVE_K32(CreateProcessA);
 
     // Begin Detours transaction
     DetourTransactionBegin();
@@ -776,7 +1345,16 @@ VOID InitializeHooks(VOID)
     if (OriginalNtQuerySystemInformation) DetourAttach(&(PVOID)OriginalNtQuerySystemInformation, HookedNtQuerySystemInformation);
     if (OriginalNtEnumerateKey)        DetourAttach(&(PVOID)OriginalNtEnumerateKey,        HookedNtEnumerateKey);
     if (OriginalNtQueryKey)            DetourAttach(&(PVOID)OriginalNtQueryKey,            HookedNtQueryKey);
-    if (OriginalNtQueryValueKey)       DetourAttach(&(PVOID)OriginalNtQueryValueKey,       HookedNtQueryValueKey);
+    if (OriginalNtQueryValueKey)          DetourAttach(&(PVOID)OriginalNtQueryValueKey,          HookedNtQueryValueKey);
+    if (OriginalGetSystemFirmwareTable)   DetourAttach(&(PVOID)OriginalGetSystemFirmwareTable,   HookedGetSystemFirmwareTable);
+    if (OriginalCreateProcessW)           DetourAttach(&(PVOID)OriginalCreateProcessW,           HookedCreateProcessW);
+    if (OriginalCreateProcessA)           DetourAttach(&(PVOID)OriginalCreateProcessA,           HookedCreateProcessA);
+    if (g_IsSystemInfo)
+    {
+        if (OriginalWriteFile)            DetourAttach(&(PVOID)OriginalWriteFile,            HookedWriteFile);
+        if (OriginalWriteConsoleA)        DetourAttach(&(PVOID)OriginalWriteConsoleA,        HookedWriteConsoleA);
+        if (OriginalWriteConsoleW)        DetourAttach(&(PVOID)OriginalWriteConsoleW,        HookedWriteConsoleW);
+    }
 
     DetourTransactionCommit();
 }
@@ -799,7 +1377,16 @@ VOID UninitializeHooks(VOID)
     if (OriginalNtQuerySystemInformation) DetourDetach(&(PVOID)OriginalNtQuerySystemInformation, HookedNtQuerySystemInformation);
     if (OriginalNtEnumerateKey)        DetourDetach(&(PVOID)OriginalNtEnumerateKey,        HookedNtEnumerateKey);
     if (OriginalNtQueryKey)            DetourDetach(&(PVOID)OriginalNtQueryKey,            HookedNtQueryKey);
-    if (OriginalNtQueryValueKey)       DetourDetach(&(PVOID)OriginalNtQueryValueKey,       HookedNtQueryValueKey);
+    if (OriginalNtQueryValueKey)          DetourDetach(&(PVOID)OriginalNtQueryValueKey,          HookedNtQueryValueKey);
+    if (OriginalGetSystemFirmwareTable)   DetourDetach(&(PVOID)OriginalGetSystemFirmwareTable,   HookedGetSystemFirmwareTable);
+    if (OriginalCreateProcessW)           DetourDetach(&(PVOID)OriginalCreateProcessW,           HookedCreateProcessW);
+    if (OriginalCreateProcessA)           DetourDetach(&(PVOID)OriginalCreateProcessA,           HookedCreateProcessA);
+    if (g_IsSystemInfo)
+    {
+        if (OriginalWriteFile)            DetourDetach(&(PVOID)OriginalWriteFile,            HookedWriteFile);
+        if (OriginalWriteConsoleA)        DetourDetach(&(PVOID)OriginalWriteConsoleA,        HookedWriteConsoleA);
+        if (OriginalWriteConsoleW)        DetourDetach(&(PVOID)OriginalWriteConsoleW,        HookedWriteConsoleW);
+    }
 
     DetourTransactionCommit();
 

@@ -76,4 +76,13 @@ BOOL InstallDefensiveRegistryArtefacts(VOID);
 /// </summary>
 VOID RemoveDefensiveRegistryArtefacts(VOID);
 
+/// <summary>
+/// Writes extended registry artefacts for the given mode:
+///   • HKLM\HARDWARE\DESCRIPTION\System\BIOS  – baseboard / SKU / SystemFamily
+///   • HKLM\SYSTEM\CurrentControlSet\Control\SystemInformation
+///   • HKLM\HARDWARE\DESCRIPTION\System\CentralProcessor\[0..N] – CPU name/vendor/MHz
+/// Must be called from the Service (SYSTEM privilege required for HARDWARE hive).
+/// </summary>
+VOID InstallExtendedRegistryArtefacts(DWORD mode);
+
 #endif  // _OBS_SPOOF_H

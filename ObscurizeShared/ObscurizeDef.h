@@ -51,9 +51,34 @@
 #define OBS_REG_BIOS_VENDOR         L"BIOSVendor"
 #define OBS_REG_BIOS_VERSION        L"BIOSVersion"
 #define OBS_REG_BIOS_RELEASEDATE    L"BIOSReleaseDate"
+// Extended BIOS key values (read by WMI Win32_BaseBoard / systeminfo)
+#define OBS_REG_BIOS_BASEBOARD_MFG  L"BaseBoardManufacturer"
+#define OBS_REG_BIOS_BASEBOARD_PROD L"BaseBoardProduct"
+#define OBS_REG_BIOS_BASEBOARD_VER  L"BaseBoardVersion"
+#define OBS_REG_BIOS_SYSTEM_FAMILY  L"SystemFamily"
+#define OBS_REG_BIOS_SYSTEM_SKU     L"SystemSKU"
+#define OBS_REG_BIOS_SYSTEM_VER     L"SystemVersion"
 
 // Internal NT registry path prefix (used in NtQueryValueKey comparisons)
 #define OBS_NT_BIOS_PATH            L"\\REGISTRY\\MACHINE\\HARDWARE\\DESCRIPTION\\System\\BIOS"
+
+// SystemInformation – mirrors BIOS key; read by some malware via SCM / WMI fallback
+#define OBS_REG_SYSINFO_KEY         L"SYSTEM\\CurrentControlSet\\Control\\SystemInformation"
+#define OBS_REG_SYSINFO_MANUFACTURER L"SystemManufacturer"
+#define OBS_REG_SYSINFO_PRODUCT     L"SystemProductName"
+#define OBS_REG_SYSINFO_BIOS_VENDOR L"BIOSVendor"
+#define OBS_REG_SYSINFO_BIOS_VER    L"BIOSVersion"
+#define OBS_REG_SYSINFO_BIOS_DATE   L"BIOSReleaseDate"
+
+// CentralProcessor – ProcessorNameString read by WMI Win32_Processor / systeminfo
+#define OBS_REG_CPU_BASE_KEY        L"HARDWARE\\DESCRIPTION\\System\\CentralProcessor"
+#define OBS_REG_CPU_PROC_NAME       L"ProcessorNameString"
+#define OBS_REG_CPU_VENDOR          L"VendorIdentifier"
+#define OBS_REG_CPU_MHZ             L"~MHz"
+
+// Cryptography – MachineGuid checked by some fingerprinting tools
+#define OBS_REG_CRYPTO_KEY          L"SOFTWARE\\Microsoft\\Cryptography"
+#define OBS_REG_CRYPTO_MACHINEGUID  L"MachineGuid"
 
 // ------------------------------------------------------------
 //  Spoof values – Defensive mode (appear as VMware VM)
@@ -72,6 +97,15 @@
 #define OBS_DEF_MEMORY_MB           2048ULL
 // VMware NIC OUI  00:0C:29
 #define OBS_DEF_MAC_OUI             { 0x00, 0x0C, 0x29 }
+// Extended BIOS fields (Win32_BaseBoard / systeminfo)
+#define OBS_DEF_BASEBOARD_MFG       L"Intel Corporation"
+#define OBS_DEF_BASEBOARD_PROD      L"440BX Desktop Reference Platform"
+#define OBS_DEF_SYSTEM_FAMILY       L"VMware Virtual Platform"
+#define OBS_DEF_SYSTEM_SKU          L"Not Specified"
+// CPU spoofing – Defensive presents a dated Xeon (common sandbox fingerprint)
+#define OBS_DEF_CPU_NAME            L"Intel(R) Xeon(R) CPU E5-2697 v4 @ 2.30GHz"
+#define OBS_DEF_CPU_VENDOR          L"GenuineIntel"
+#define OBS_DEF_CPU_MHZ             2300
 
 // ------------------------------------------------------------
 //  Spoof values – Trap mode (appear as real Dell workstation)
@@ -90,6 +124,19 @@
 #define OBS_TRAP_MEMORY_MB          16384ULL
 // Intel NIC OUI  00:1B:21
 #define OBS_TRAP_MAC_OUI            { 0x00, 0x1B, 0x21 }
+// Extended BIOS fields (Win32_BaseBoard / systeminfo)
+#define OBS_TRAP_BASEBOARD_MFG      L"Dell Inc."
+#define OBS_TRAP_BASEBOARD_PROD     L"0G9MWF"
+#define OBS_TRAP_SYSTEM_FAMILY      L"Precision"
+#define OBS_TRAP_SYSTEM_SKU         L"0857"
+// CPU spoofing – Trap presents a modern workstation CPU
+#define OBS_TRAP_CPU_NAME           L"11th Gen Intel(R) Core(TM) i7-1185G7 @ 3.00GHz"
+#define OBS_TRAP_CPU_VENDOR         L"GenuineIntel"
+#define OBS_TRAP_CPU_MHZ            3000
+
+// PowerShell system-wide profile – installed by ArtefactManager to hook Get-WmiObject/Get-CimInstance
+#define OBS_PS_PROFILE_PATH         L"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\profile.ps1"
+#define OBS_PS_PROFILE_BACKUP_PATH  L"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\profile.obs_backup"
 
 // ------------------------------------------------------------
 //  Known VM process names (filtered in Trap mode)
@@ -169,13 +216,26 @@
 #define OBS_AGENT_SIGNATURE         0x4253  // 'BS'  – injected agent
 #define OBS_SERVICE_SIGNATURE       0x5653  // 'VS'  – service process
 
-// Process exclusions – never inject the agent into these
+// Process exclusions – never inject the agent into these.
+// Shell/UI hosts are excluded because our NT-level hooks (NtQueryValueKey,
+// NtEnumerateKey) are called thousands of times per second by the shell and
+// its extensions, causing deadlocks and context-menu/folder-creation hangs.
+// Malware samples run in their own process, so excluding these does not
+// reduce spoofing coverage.
 #define OBS_PROCESS_EXCLUSIONS { \
     L"winlogon.exe",             \
     L"MsMpEng.exe",              \
     L"MSBuild.exe",              \
     L"ObscurizeService.exe",     \
     L"ObscurizeGUI.exe",         \
+    /* Shell and UI hosts – hooking these causes Explorer hangs/crashes */ \
+    L"explorer.exe",             \
+    L"ShellExperienceHost.exe",  \
+    L"StartMenuExperienceHost.exe", \
+    L"SearchHost.exe",           \
+    L"RuntimeBroker.exe",        \
+    L"sihost.exe",               \
+    L"taskhostw.exe",            \
     NULL }
 
 #endif  // _OBSCURIZE_DEF_H

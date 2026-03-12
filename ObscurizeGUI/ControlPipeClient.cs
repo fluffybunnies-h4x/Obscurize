@@ -94,14 +94,15 @@ namespace Obscurize
                 PipeNameWithoutPrefix(),
                 PipeDirection.InOut,
                 PipeOptions.None,
-                TokenImpersonationLevel.Impersonation);
+                TokenImpersonationLevel.Anonymous);
 
         private static bool TryConnect(NamedPipeClientStream pipe)
         {
             try
             {
                 pipe.Connect(ConnectTimeoutMs);
-                pipe.ReadMode = PipeTransmissionMode.Message;
+                // Server (r77 CreatePublicNamedPipe) uses PIPE_TYPE_BYTE – must match.
+                pipe.ReadMode = PipeTransmissionMode.Byte;
                 return true;
             }
             catch (TimeoutException)

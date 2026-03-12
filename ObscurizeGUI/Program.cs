@@ -12,6 +12,10 @@ namespace Obscurize
         [STAThread]
         static void Main()
         {
+            // Must be called before any UI, including MessageBox.
+            Application.EnableVisualStyles();
+            Application.SetCompatibleTextRenderingDefault(false);
+
             const string mutexName = "Global\\ObscurizeGUI_SingleInstance";
             _instanceMutex = new Mutex(true, mutexName, out bool createdNew);
 
@@ -26,9 +30,6 @@ namespace Obscurize
                     MessageBoxIcon.Information);
                 return;
             }
-
-            Application.EnableVisualStyles();
-            Application.SetCompatibleTextRenderingDefault(false);
 
             // Run as a tray-only application using ApplicationContext instead of a Form.
             using TrayApplicationContext context = new();

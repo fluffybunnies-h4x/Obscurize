@@ -116,8 +116,15 @@ namespace Obscurize
 
         private void OnExitClicked(object? sender, EventArgs e)
         {
+            StatusPoller.Current.Stop();
             _trayIcon.Visible = false;
-            Application.Exit();
+            _trayIcon.Dispose();
+
+            // Dispose the main window directly (bypasses the hide-on-close handler).
+            _mainWindow?.Dispose();
+            _mainWindow = null;
+
+            Environment.Exit(0);
         }
 
         // ── Status poller callback ────────────────────────────────
