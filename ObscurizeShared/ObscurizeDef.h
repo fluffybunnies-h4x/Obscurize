@@ -26,6 +26,8 @@
 #define OBS_CONFIG_VALUE_USERNAME   L"SpoofUsername" // SZ     Trap mode username
 #define OBS_CONFIG_VALUE_COMPNAME   L"SpoofCompName" // SZ     Trap mode computer name
 #define OBS_CONFIG_VALUE_MACVENDOR  L"SpoofMacOUI"   // BINARY 3 bytes OUI for Trap MAC
+#define OBS_CONFIG_VALUE_DOMAIN_ENABLED L"DomainEnabled"   // DWORD  0/1
+#define OBS_CONFIG_VALUE_DOMAIN_NAME    L"SpoofDomainName" // SZ     spoofed domain name
 
 // ------------------------------------------------------------
 //  Registry – VM artefacts written/removed by the Service
@@ -134,6 +136,15 @@
 #define OBS_TRAP_CPU_VENDOR         L"GenuineIntel"
 #define OBS_TRAP_CPU_MHZ            3000
 
+// ------------------------------------------------------------
+//  Domain spoof values  (used by NetGetJoinInformation hook)
+// ------------------------------------------------------------
+
+/// Domain name returned when DomainEnabled = 1
+#define OBS_SPOOF_DOMAIN_ACTIVE     L"CORP.DEV"
+/// Workgroup name returned when DomainEnabled = 0
+#define OBS_SPOOF_DOMAIN_INACTIVE   L"WORKGROUP"
+
 // PowerShell system-wide profile – installed by ArtefactManager to hook Get-WmiObject/Get-CimInstance
 #define OBS_PS_PROFILE_PATH         L"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\profile.ps1"
 #define OBS_PS_PROFILE_BACKUP_PATH  L"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\profile.obs_backup"
@@ -199,6 +210,8 @@
 #define OBS_CTRL_QUERY_STATUS       0x0005  // Request status reply
 #define OBS_CTRL_INJECT_ALL         0x0006  // Re-inject agent into all processes
 #define OBS_CTRL_DETACH_ALL         0x0007  // Detach agent from all processes
+#define OBS_CTRL_DOMAIN_ENABLE      0x0008  // Enable domain spoofing (PartOfDomain = True)
+#define OBS_CTRL_DOMAIN_DISABLE     0x0009  // Disable domain spoofing (PartOfDomain = False / WORKGROUP)
 
 // Status reply codes (Service -> GUI)
 #define OBS_STATUS_OK               0x0000

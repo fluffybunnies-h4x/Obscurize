@@ -42,16 +42,18 @@ namespace Obscurize
         private static readonly Color ColDanger       = Color.FromArgb(220,  70,  70);
 
         // ── Controls ──────────────────────────────────────────────
-        private readonly Label      _lblStatusBadge;
-        private readonly PowerButton _btnPower;
-        private readonly ModeButton  _btnDefensive;
-        private readonly ModeButton  _btnTrap;
-        private readonly Panel       _spoofPanel;
-        private readonly SpoofRow[]  _spoofRows;
-        private readonly RichTextBox _rtbLog;
+        private readonly Label        _lblStatusBadge;
+        private readonly PowerButton  _btnPower;
+        private readonly ModeButton   _btnDefensive;
+        private readonly ModeButton   _btnTrap;
+        private readonly DomainButton _btnDomain;
+        private readonly Panel        _spoofPanel;
+        private readonly SpoofRow[]   _spoofRows;
+        private readonly RichTextBox  _rtbLog;
 
         // ── State ─────────────────────────────────────────────────
-        private ServiceStatus _currentStatus = ServiceStatus.ServiceOffline;
+        private ServiceStatus _currentStatus  = ServiceStatus.ServiceOffline;
+        private bool          _domainEnabled  = false;
 
         // Spoof row definitions (label, Defensive value, Trap value)
         private static readonly (string Label, string Defensive, string Trap)[] SpoofDefs =
@@ -64,6 +66,9 @@ namespace Obscurize
             ("BIOS Manufacturer",  ObscurizeConst.DefManufacturer, ObscurizeConst.TrapManufacturer),
             ("VM Processes",       "Visible (vmtoolsd…)",  "Hidden"),
             ("VM Services",        "Visible (VMTools…)",   "Hidden"),
+            // Domain row: _trapValue = domain-active string; handled specially in SetSpoofRowsActive
+            ("Domain",             $"{ObscurizeConst.SpoofDomainInactive}  (PartOfDomain: False)",
+                                   $"{ObscurizeConst.SpoofDomainActive}  (PartOfDomain: True)"),
         };
 
         // ─────────────────────────────────────────────────────────
@@ -72,7 +77,7 @@ namespace Obscurize
         {
             // ── Form properties ───────────────────────────────────
             Text            = "Obscurize – Control Panel";
-            ClientSize      = new Size(480, 590);
+            ClientSize      = new Size(480, 659);
             FormBorderStyle = FormBorderStyle.FixedSingle;
             MaximizeBox     = false;
             BackColor       = ColBackground;
@@ -175,6 +180,35 @@ namespace Obscurize
 
             AddSeparator(y); y += 1;
 
+            // ── Domain toggle ──────────────────────────────────────
+            Panel pnlDomain = MakePanel(0, y, 480, 40, ColBackground);
+            y += 40;
+
+            Label lblDomain = new()
+            {
+                Text      = "DOMAIN",
+                Font      = new Font("Segoe UI", 7.5f, FontStyle.Bold, GraphicsUnit.Point),
+                ForeColor = ColMuted,
+                AutoSize  = false,
+                Bounds    = new Rectangle(16, 12, 60, 16),
+                TextAlign = ContentAlignment.MiddleLeft,
+                BackColor = Color.Transparent,
+            };
+
+            _btnDomain = new DomainButton
+            {
+                Bounds   = new Rectangle(80, 4, 270, 32),
+                TabIndex = 3,
+            };
+            _btnDomain.SetDomainState(false, ObscurizeConst.SpoofDomainActive);
+            _btnDomain.Click += OnDomainClick;
+
+            pnlDomain.Controls.Add(lblDomain);
+            pnlDomain.Controls.Add(_btnDomain);
+            Controls.Add(pnlDomain);
+
+            AddSeparator(y); y += 1;
+
             // ── Spoof status panel ────────────────────────────────
             Label lblSpoofs = new()
             {
@@ -237,6 +271,19 @@ namespace Obscurize
             Controls.Add(_rtbLog);
 
             // ── Initial state ─────────────────────────────────────
+            // Sync domain toggle with whatever is already in the registry.
+            try
+            {
+                using var regKey = Microsoft.Win32.Registry.LocalMachine
+                    .OpenSubKey(ObscurizeConst.ConfigKey, writable: false);
+                if (regKey?.GetValue(ObscurizeConst.ConfigValueDomainEnabled) is int domVal && domVal != 0)
+                {
+                    _domainEnabled = true;
+                    _btnDomain.SetDomainState(true, ObscurizeConst.SpoofDomainActive);
+                }
+            }
+            catch { /* registry not yet created – leave default false */ }
+
             UpdateStatus(ServiceStatus.ServiceOffline);
             StatusPoller.Current.StatusChanged += (_, s) => this.Invoke(new Action(() => UpdateStatus(s)));
 
@@ -311,12 +358,37 @@ namespace Obscurize
             }
         }
 
+        // ── Domain button handler ─────────────────────────────────
+
+        private void OnDomainClick(object? sender, EventArgs e)
+        {
+            _domainEnabled = !_domainEnabled;
+            bool sent = ControlPipeClient.Send(_domainEnabled
+                ? ObscurizeConst.CtrlDomainEnable
+                : ObscurizeConst.CtrlDomainDisable);
+
+            _btnDomain.SetDomainState(_domainEnabled, ObscurizeConst.SpoofDomainActive);
+
+            // Refresh domain spoof row to reflect new state
+            bool isActive = _currentStatus == ServiceStatus.ActiveDefensive
+                         || _currentStatus == ServiceStatus.ActiveTrap;
+            _spoofRows[SpoofDefs.Length - 1].SetActive(isActive, _domainEnabled);
+
+            AppendLog(sent
+                ? $"Sent: Domain {(_domainEnabled ? "Enable" : "Disable")} → {(_domainEnabled ? ObscurizeConst.SpoofDomainActive : ObscurizeConst.SpoofDomainInactive)}"
+                : "Failed to contact service.", sent ? ColTextDim : ColDanger);
+        }
+
         // ── Spoof row state helpers ───────────────────────────────
 
         private void SetSpoofRowsActive(bool active, bool trapMode)
         {
-            foreach (SpoofRow row in _spoofRows)
-                row.SetActive(active, trapMode);
+            // All rows except the last use the mode-based trapMode flag.
+            for (int i = 0; i < _spoofRows.Length - 1; i++)
+                _spoofRows[i].SetActive(active, trapMode);
+
+            // Domain row (last): trapMode flag = domain enabled, not Trap mode.
+            _spoofRows[_spoofRows.Length - 1].SetActive(active, _domainEnabled);
         }
 
         private void SetModeButtonsEnabled(bool enabled)
@@ -484,6 +556,62 @@ namespace Obscurize
                                GraphicsUnit.Point);
             SizeF sz = g.MeasureString(_label, f);
             g.DrawString(_label, f, fgBrush, (Width - sz.Width) / 2f, (Height - sz.Height) / 2f);
+        }
+
+        protected override void OnMouseEnter(EventArgs e) { Invalidate(); base.OnMouseEnter(e); }
+        protected override void OnMouseLeave(EventArgs e) { Invalidate(); base.OnMouseLeave(e); }
+    }
+
+    // ============================================================
+    //  DomainButton – pill toggle showing domain join state
+    // ============================================================
+
+    internal sealed class DomainButton : Control
+    {
+        private bool   _domainEnabled;
+        private string _domainName = "CORP.LOCAL";
+
+        private static readonly Color ColOn   = Color.FromArgb(80, 200, 120);
+        private static readonly Color ColOff  = Color.FromArgb(40, 40, 58);
+
+        internal void SetDomainState(bool enabled, string domainName)
+        {
+            _domainEnabled = enabled;
+            _domainName    = domainName;
+            Invalidate();
+        }
+
+        public DomainButton()
+        {
+            SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint
+                   | ControlStyles.OptimizedDoubleBuffer | ControlStyles.SupportsTransparentBackColor, true);
+            BackColor = Color.Transparent;
+            Cursor    = Cursors.Hand;
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            Graphics g = e.Graphics;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+
+            Color bg     = _domainEnabled ? ColOn  : ColOff;
+            Color fg     = _domainEnabled ? Color.Black : Color.FromArgb(160, 160, 180);
+            Color border = _domainEnabled ? ColOn  : Color.FromArgb(70, 70, 90);
+            string label = _domainEnabled
+                ? $"  {_domainName}  (PartOfDomain: True)"
+                : "  WORKGROUP  (PartOfDomain: False)";
+
+            using SolidBrush bgBrush = new(bg);
+            using SolidBrush fgBrush = new(fg);
+            using Pen        bdrPen  = new(border, _domainEnabled ? 2f : 1f);
+
+            g.FillRectangle(bgBrush, 1, 1, Width - 2, Height - 2);
+            g.DrawRectangle(bdrPen,  0, 0, Width - 1, Height - 1);
+
+            using Font f = new("Segoe UI", 8.5f, _domainEnabled ? FontStyle.Bold : FontStyle.Regular,
+                               GraphicsUnit.Point);
+            SizeF sz = g.MeasureString(label, f);
+            g.DrawString(label, f, fgBrush, 4, (Height - sz.Height) / 2f);
         }
 
         protected override void OnMouseEnter(EventArgs e) { Invalidate(); base.OnMouseEnter(e); }

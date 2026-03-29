@@ -1,0 +1,31 @@
+# Visual Studio IDE state – not source code
+.vs/
+
+# Build outputs
+*.obj
+*.pdb
+*.iobj
+*.ipdb
+*.exp
+*.lib
+*.log
+*.tlog
+*.res
+*.cache
+
+# MSBuild intermediate directories
+**/Release/
+**/Debug/
+**/x64/
+**/x86/
+
+# .NET build output
+**/bin/
+**/obj/
+
+# Output binaries (tracked explicitly if needed, otherwise exclude)
+# output/
+
+# User-specific files
+*.user
+*.suo

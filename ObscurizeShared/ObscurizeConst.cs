@@ -22,7 +22,9 @@ namespace Obscurize
         public const string ConfigValueMode     = "Mode";
         public const string ConfigValueUsername = "SpoofUsername";
         public const string ConfigValueCompName = "SpoofCompName";
-        public const string ConfigValueMacOUI   = "SpoofMacOUI";
+        public const string ConfigValueMacOUI          = "SpoofMacOUI";
+        public const string ConfigValueDomainEnabled   = "DomainEnabled";
+        public const string ConfigValueDomainName      = "SpoofDomainName";
 
         // --------------------------------------------------------
         //  Registry – VM artefact keys (Defensive creates / Trap removes)
@@ -64,6 +66,12 @@ namespace Obscurize
         public static readonly byte[] TrapMacOUI   = { 0x00, 0x1B, 0x21 };
 
         // --------------------------------------------------------
+        //  Domain spoof values
+        // --------------------------------------------------------
+        public const string SpoofDomainActive   = "CORP.DEV";
+        public const string SpoofDomainInactive = "WORKGROUP";
+
+        // --------------------------------------------------------
         //  Named pipe – GUI control interface
         // --------------------------------------------------------
         public const string ControlPipeName = @"\\.\pipe\ObscurizeCtrl";
@@ -78,6 +86,8 @@ namespace Obscurize
         public const int CtrlQueryStatus       = 0x0005;
         public const int CtrlInjectAll         = 0x0006;
         public const int CtrlDetachAll         = 0x0007;
+        public const int CtrlDomainEnable      = 0x0008;
+        public const int CtrlDomainDisable     = 0x0009;
 
         // Status reply codes  (Service -> GUI)
         public const int StatusOk              = 0x0000;

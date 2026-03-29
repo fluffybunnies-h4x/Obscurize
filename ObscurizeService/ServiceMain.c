@@ -263,6 +263,22 @@ VOID ObsControlCallback(DWORD controlCode, HANDLE pipe)
             break;
         }
 
+        // ---- Domain spoofing toggle ----
+        case OBS_CTRL_DOMAIN_ENABLE:
+        case OBS_CTRL_DOMAIN_DISABLE:
+        {
+            DWORD val = (controlCode == OBS_CTRL_DOMAIN_ENABLE) ? 1 : 0;
+            HKEY key;
+            if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, OBS_CONFIG_KEY, 0,
+                              KEY_SET_VALUE | KEY_WOW64_64KEY, &key) == ERROR_SUCCESS)
+            {
+                RegSetValueExW(key, OBS_CONFIG_VALUE_DOMAIN_ENABLED, 0, REG_DWORD,
+                               (LPBYTE)&val, sizeof(DWORD));
+                RegCloseKey(key);
+            }
+            break;
+        }
+
         // ---- Injection control ----
         case OBS_CTRL_INJECT_ALL:
         {

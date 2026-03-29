@@ -1261,6 +1261,58 @@ static BOOL WINAPI HookedWriteConsoleW(
 }
 
 // ============================================================
+//  NetGetJoinInformation hook
+//
+//  Win32_ComputerSystem.PartOfDomain and .Domain are both backed
+//  by NetGetJoinInformation (netapi32.dll).  This covers:
+//    Get-WmiObject  -Class Win32_ComputerSystem | Select PartOfDomain
+//    Get-CimInstance -ClassName Win32_ComputerSystem | Select PartOfDomain
+//
+//  When DomainEnabled = 0: reports WORKGROUP  / PartOfDomain = False
+//  When DomainEnabled = 1: reports CORP.LOCAL / PartOfDomain = True
+// ============================================================
+
+// NetSetupJoinStatus values (from lmjoin.h – defined inline to avoid lm.h dependency)
+#define OBS_NetSetupWorkgroupName  2
+#define OBS_NetSetupDomainName     3
+
+typedef DWORD (WINAPI *PFN_NetGetJoinInformation)(LPCWSTR, LPWSTR *, DWORD *);
+typedef DWORD (WINAPI *PFN_NetApiBufferAllocate)(DWORD, LPVOID *);
+typedef DWORD (WINAPI *PFN_NetApiBufferFree)(LPVOID);
+
+static PFN_NetGetJoinInformation OriginalNetGetJoinInformation = NULL;
+static PFN_NetApiBufferAllocate  g_NetApiBufferAllocate        = NULL;
+
+static DWORD WINAPI HookedNetGetJoinInformation(
+    LPCWSTR lpServer, LPWSTR *lpNameBuffer, DWORD *BufferType)
+{
+    if (!ObsIsEnabled() || !lpNameBuffer || !BufferType)
+        return OriginalNetGetJoinInformation(lpServer, lpNameBuffer, BufferType);
+
+    WCHAR domainName[256];
+    ObsGetSpoofDomainName(domainName, 256);
+    DWORD spoofStatus = ObsGetDomainEnabled()
+                        ? OBS_NetSetupDomainName
+                        : OBS_NetSetupWorkgroupName;
+
+    // Allocate the output buffer via NetApiBufferAllocate so the caller
+    // can free it normally with NetApiBufferFree.
+    DWORD nameBytes = (DWORD)(wcslen(domainName) + 1) * sizeof(WCHAR);
+    LPVOID buf = NULL;
+    if (g_NetApiBufferAllocate &&
+        g_NetApiBufferAllocate(nameBytes, &buf) == 0 && buf)
+    {
+        CopyMemory(buf, domainName, nameBytes);
+        *lpNameBuffer = (LPWSTR)buf;
+        *BufferType   = spoofStatus;
+        return 0; // NERR_Success
+    }
+
+    // Allocation failed – fall through to original
+    return OriginalNetGetJoinInformation(lpServer, lpNameBuffer, BufferType);
+}
+
+// ============================================================
 //  Detours attach / detach helpers
 // ============================================================
 
@@ -1327,6 +1379,8 @@ VOID InitializeHooks(VOID)
     OriginalGetSystemFirmwareTable   = (UINT(WINAPI*)(DWORD,DWORD,PVOID,DWORD)) RESOLVE_K32(GetSystemFirmwareTable);
     OriginalCreateProcessW           = (BOOL(WINAPI*)(LPCWSTR,LPWSTR,LPSECURITY_ATTRIBUTES,LPSECURITY_ATTRIBUTES,BOOL,DWORD,LPVOID,LPCWSTR,LPSTARTUPINFOW,LPPROCESS_INFORMATION)) RESOLVE_K32(CreateProcessW);
     OriginalCreateProcessA           = (BOOL(WINAPI*)(LPCSTR,LPSTR,LPSECURITY_ATTRIBUTES,LPSECURITY_ATTRIBUTES,BOOL,DWORD,LPVOID,LPCSTR,LPSTARTUPINFOA,LPPROCESS_INFORMATION))  RESOLVE_K32(CreateProcessA);
+    OriginalNetGetJoinInformation    = (PFN_NetGetJoinInformation) ResolveFunction("netapi32.dll", "NetGetJoinInformation");
+    g_NetApiBufferAllocate           = (PFN_NetApiBufferAllocate)  ResolveFunction("netapi32.dll", "NetApiBufferAllocate");
 
     // Begin Detours transaction
     DetourTransactionBegin();
@@ -1349,6 +1403,7 @@ VOID InitializeHooks(VOID)
     if (OriginalGetSystemFirmwareTable)   DetourAttach(&(PVOID)OriginalGetSystemFirmwareTable,   HookedGetSystemFirmwareTable);
     if (OriginalCreateProcessW)           DetourAttach(&(PVOID)OriginalCreateProcessW,           HookedCreateProcessW);
     if (OriginalCreateProcessA)           DetourAttach(&(PVOID)OriginalCreateProcessA,           HookedCreateProcessA);
+    if (OriginalNetGetJoinInformation)    DetourAttach(&(PVOID)OriginalNetGetJoinInformation,    HookedNetGetJoinInformation);
     if (g_IsSystemInfo)
     {
         if (OriginalWriteFile)            DetourAttach(&(PVOID)OriginalWriteFile,            HookedWriteFile);
@@ -1381,6 +1436,7 @@ VOID UninitializeHooks(VOID)
     if (OriginalGetSystemFirmwareTable)   DetourDetach(&(PVOID)OriginalGetSystemFirmwareTable,   HookedGetSystemFirmwareTable);
     if (OriginalCreateProcessW)           DetourDetach(&(PVOID)OriginalCreateProcessW,           HookedCreateProcessW);
     if (OriginalCreateProcessA)           DetourDetach(&(PVOID)OriginalCreateProcessA,           HookedCreateProcessA);
+    if (OriginalNetGetJoinInformation)    DetourDetach(&(PVOID)OriginalNetGetJoinInformation,    HookedNetGetJoinInformation);
     if (g_IsSystemInfo)
     {
         if (OriginalWriteFile)            DetourDetach(&(PVOID)OriginalWriteFile,            HookedWriteFile);

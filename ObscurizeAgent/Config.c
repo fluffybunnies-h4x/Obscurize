@@ -30,6 +30,8 @@ static POBS_CONFIG ReadConfigFromRegistry(VOID)
     static const BYTE trapOUI[] = OBS_TRAP_MAC_OUI;
     CopyMemory(cfg->SpoofMacOUI, trapOUI, 3);
     cfg->CustomMacOUI = FALSE;
+    cfg->DomainEnabled = FALSE;
+    StringCchCopyW(cfg->SpoofDomainName, 256, OBS_SPOOF_DOMAIN_ACTIVE);
 
     HKEY key = NULL;
     if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, OBS_CONFIG_KEY, 0,
@@ -75,6 +77,19 @@ static POBS_CONFIG ReadConfigFromRegistry(VOID)
         CopyMemory(cfg->SpoofMacOUI, ouiBuf, 3);
         cfg->CustomMacOUI = TRUE;
     }
+
+    // DomainEnabled
+    size = sizeof(DWORD);
+    if (RegQueryValueExW(key, OBS_CONFIG_VALUE_DOMAIN_ENABLED, NULL, &type,
+                         (LPBYTE)&value, &size) == ERROR_SUCCESS && type == REG_DWORD)
+    {
+        cfg->DomainEnabled = (value != 0);
+    }
+
+    // Domain name override
+    size = sizeof(cfg->SpoofDomainName) - sizeof(WCHAR);
+    RegQueryValueExW(key, OBS_CONFIG_VALUE_DOMAIN_NAME, NULL, &type,
+                     (LPBYTE)cfg->SpoofDomainName, &size);
 
     RegCloseKey(key);
     return cfg;
@@ -256,4 +271,24 @@ VOID ObsGetSpoofResolution(PDWORD width, PDWORD height)
         *width  = OBS_TRAP_SCREEN_WIDTH;
         *height = OBS_TRAP_SCREEN_HEIGHT;
     }
+}
+
+BOOL ObsGetDomainEnabled(VOID)
+{
+    EnterCriticalSection(&s_configLock);
+    POBS_CONFIG cfg = (POBS_CONFIG)s_config;
+    BOOL result = cfg ? cfg->DomainEnabled : FALSE;
+    LeaveCriticalSection(&s_configLock);
+    return result;
+}
+
+VOID ObsGetSpoofDomainName(PWCHAR buf, DWORD bufCch)
+{
+    EnterCriticalSection(&s_configLock);
+    POBS_CONFIG cfg = (POBS_CONFIG)s_config;
+    if (cfg && cfg->DomainEnabled)
+        StringCchCopyW(buf, bufCch, cfg->SpoofDomainName);
+    else
+        StringCchCopyW(buf, bufCch, OBS_SPOOF_DOMAIN_INACTIVE);
+    LeaveCriticalSection(&s_configLock);
 }

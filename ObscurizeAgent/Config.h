@@ -25,6 +25,10 @@ typedef struct _OBS_CONFIG
     WCHAR SpoofComputerName[MAX_COMPUTERNAME_LENGTH + 1];
     BYTE  SpoofMacOUI[3];                   // First 3 bytes of the spoofed MAC
     BOOL  CustomMacOUI;                     // TRUE if SpoofMacOUI was set in registry
+
+    // Domain spoofing (independent of Defensive/Trap mode)
+    BOOL  DomainEnabled;                    // TRUE = report as domain-joined
+    WCHAR SpoofDomainName[256];             // Domain name when DomainEnabled (default CORP.LOCAL)
 } OBS_CONFIG, *POBS_CONFIG;
 
 // ------------------------------------------------------------
@@ -75,5 +79,15 @@ ULONGLONG ObsGetSpoofMemoryBytes(VOID);
 /// height into <paramref name="height"/>.
 /// </summary>
 VOID ObsGetSpoofResolution(PDWORD width, PDWORD height);
+
+/// <summary>Returns TRUE if domain spoofing is enabled.</summary>
+BOOL ObsGetDomainEnabled(VOID);
+
+/// <summary>
+/// Fills <paramref name="buf"/> with the spoofed domain name when
+/// DomainEnabled is TRUE, or WORKGROUP when FALSE.
+/// Buffer must be at least 256 WCHARs.
+/// </summary>
+VOID ObsGetSpoofDomainName(PWCHAR buf, DWORD bufCch);
 
 #endif  // _OBS_CONFIG_H

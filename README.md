@@ -23,11 +23,23 @@ service stops.
 ## Threat Model & Background
 
 Modern malware routinely performs environment checks before executing its
-payload. The [DEAD#VAX campaign](https://www.securonix.com/blog/deadvax-threat-research-security-advisory/) (Securonix, 2026) is a documented example:
-it inspects the current username, available RAM, MAC address OUI, WMI BIOS
+payload. Two documented campaigns from Securonix Threat Research illustrate
+the scope of this problem:
+
+**DEAD#VAX** ([Securonix, 2026](https://www.securonix.com/blog/deadvax-threat-research-security-advisory/))
+inspects the current username, available RAM, MAC address OUI, WMI BIOS
 strings, and the presence of VMware / VirtualBox registry keys and artifact
 files before proceeding. If the host looks like a sandbox, the malware exits
 silently.
+
+**FAUX ELEVATE** ([Securonix, 2026](https://www.securonix.com/blog/faux-elevate-threat-actors-crypto-miners-and-infostealers/))
+introduced a more targeted pre-execution check: `Win32_ComputerSystem.PartOfDomain`.
+The malware queries whether the host is joined to a corporate domain before
+delivering its full payload chain. On standalone home systems or
+non-domain-joined machines, it delivers only a UAC elevation loop and withholds
+the primary payload entirely. This deliberate targeting of domain-joined machines
+confirms a campaign aimed specifically at corporate and enterprise environments,
+where credentials and internal network access carry higher value.
 
 Obscurize exploits this behaviour in two directions:
 
@@ -59,7 +71,7 @@ Obscurize exploits this behaviour in two directions:
                │  Reflective DLL injection (r77api InjectDll)
 ┌──────────────▼──────────────────────────────────────────────────┐
 │  ObscurizeAgent32/64.dll  (injected into every user process)    │
-│  • Microsoft Detours hooks on Win32 + NT APIs (20 hooks total)  │
+│  • Microsoft Detours hooks on Win32 + NT APIs (21 hooks total)  │
 │  • Reads config from registry every 1 s                         │
 │  • Hooks are installed/removed without restarting the process   │
 └─────────────────────────────────────────────────────────────────┘
@@ -93,6 +105,7 @@ Obscurize exploits this behaviour in two directions:
 | `HKLM\SOFTWARE\VMware Inc.\VMware Tools` | Registry write | Created (presence check) |
 | `HKLM\SOFTWARE\Oracle\VirtualBox Guest Additions` | Registry write | Created (presence check) |
 | `%TEMP%\mapping.csv`, `VBE_marker.tmp` | Filesystem | **Not** created (absence triggers DEADVAX abort) |
+| `NetGetJoinInformation` (`Win32_ComputerSystem.PartOfDomain`) | API hook | `WORKGROUP` / `PartOfDomain: False` |
 
 ### Trap Mode (appear as real hardware)
 
@@ -110,9 +123,10 @@ Obscurize exploits this behaviour in two directions:
 | `NtEnumerateKey` / `NtQueryKey` | NT hook | VM vendor registry subkeys filtered from `HKLM\SOFTWARE` |
 | VMware / VirtualBox registry keys | Registry delete | Removed |
 | `%TEMP%\mapping.csv`, `VBE_marker.tmp` | Filesystem | Created (presence satisfies DEADVAX check) |
-| PowerShell `Get-WmiObject` / `Get-CimInstance` | profile.ps1 hook | Returns spoofed Dell hardware strings |
+| PowerShell `Get-WmiObject` / `Get-CimInstance` | profile.ps1 hook | Returns spoofed Dell hardware strings + dynamic `PartOfDomain` / `Domain` from registry |
 | `CreateProcessW/A` (PowerShell spawn) | API hook | Strips `-NoProfile` flag so profile.ps1 always loads |
 | `systeminfo.exe` stdout | WriteConsoleW hook | Replaces VMware strings with Dell strings in terminal output |
+| `NetGetJoinInformation` (`Win32_ComputerSystem.PartOfDomain`) | API hook | `CORP.DEV` / `PartOfDomain: True` (when Domain toggle is ON) |
 
 #### PowerShell WMI Spoofing Detail
 
@@ -142,11 +156,41 @@ stdout writes. Three patterns are replaced before output reaches the terminal:
 The hook only activates in `systeminfo.exe` to avoid overhead in all other
 processes.
 
+#### Domain Join Spoofing Detail
+
+Inspired by the [FAUX ELEVATE campaign](https://www.securonix.com/blog/faux-elevate-threat-actors-crypto-miners-and-infostealers/),
+which gates full payload delivery on `Win32_ComputerSystem.PartOfDomain` being
+`True`, Obscurize uses a two-layer approach to spoof domain join state:
+
+**Layer 1 — PowerShell WMI (profile.ps1):** `Get-WmiObject Win32_ComputerSystem`
+and `Get-CimInstance Win32_ComputerSystem` execute inside `WmiPrvSE.exe`, not
+the calling PowerShell process. API hooks in the PowerShell process never fire
+for WMI-sourced data. The system-wide `profile.ps1` intercepts these calls and
+reads `DomainEnabled` from `HKLM\SOFTWARE\ObscurizeConfig` dynamically at
+query execution time, setting `PartOfDomain` and `Domain` on the returned
+object without requiring a profile regeneration when the toggle changes.
+
+**Layer 2 — Direct Win32 callers (NetGetJoinInformation hook):** Malware that
+calls `NetGetJoinInformation` in `netapi32.dll` directly (outside of WMI) is
+intercepted by the Agent hook installed in that process.
+
+The Domain toggle is independent of Defensive / Trap mode and is available
+in both. It is controlled from a dedicated button in the GUI control panel
+and persisted to `HKLM\SOFTWARE\ObscurizeConfig\DomainEnabled`.
+
+| Domain toggle | `PartOfDomain` | `Domain` |
+|---|---|---|
+| OFF (default) | `False` | `WORKGROUP` |
+| ON | `True` | `CORP.DEV` |
+
+The domain name is configurable via the `SpoofDomainName` registry value
+under `HKLM\SOFTWARE\ObscurizeConfig`.
+
 ---
 
 ## API Hooks Reference
 
-The Agent installs up to 20 Detours hooks per process. The WriteFile /
+The Agent installs up to 21 Detours hooks per process. The WriteFile /
 WriteConsoleA / WriteConsoleW hooks are only installed when the host process
 is `systeminfo.exe`.
 
@@ -172,6 +216,7 @@ is `systeminfo.exe`.
 | `WriteFile` | kernelbase | — | Patches systeminfo.exe stdout (VM→Dell strings) |
 | `WriteConsoleA` | kernelbase | — | Patches systeminfo.exe stdout (VM→Dell strings) |
 | `WriteConsoleW` | kernelbase | — | Patches systeminfo.exe stdout via ConPTY path |
+| `NetGetJoinInformation` | netapi32 | `WORKGROUP` / `PartOfDomain: False` | `CORP.DEV` / `PartOfDomain: True` (when Domain ON) |
 
 ---
 
@@ -212,6 +257,12 @@ profile-based hooks. The `CreateProcessW/A` hook walks the command-line token
 by token and silently removes any `-noprofile` / `-nop` / `-nopr` token
 (case-insensitive prefix match, minimum 3 body characters) before the child
 process is created.
+
+**Domain spoofing is mode-independent** — The `NetGetJoinInformation` hook is
+active in both Defensive and Trap modes and is controlled by a separate toggle.
+This reflects the real-world threat pattern: domain-join checks (as seen in
+FAUX ELEVATE) are a distinct pre-execution gate from VM-detection checks and
+must be addressable independently.
 
 **Reversible** — On service stop, all injected agents are detached via the
 stored function pointer in the PE header (r77-style header marker), all
@@ -358,6 +409,8 @@ query also returns a 4-byte reply.
 | `OBS_CTRL_QUERY_STATUS` | `0x0005` | Query status (reply: 0=disabled, 2=defensive, 3=trap) |
 | `OBS_CTRL_INJECT_ALL` | `0x0006` | Force inject into all running processes |
 | `OBS_CTRL_DETACH_ALL` | `0x0007` | Detach from all processes |
+| `OBS_CTRL_DOMAIN_ENABLE` | `0x0008` | Enable domain spoofing (`PartOfDomain: True`, domain `CORP.DEV`) |
+| `OBS_CTRL_DOMAIN_DISABLE` | `0x0009` | Disable domain spoofing (`PartOfDomain: False`, `WORKGROUP`) |
 
 ---
 
