@@ -1,4 +1,4 @@
-<img width="1392" height="752" alt="Obscurize" src="https://github.com/user-attachments/assets/a2ac21b7-3a8d-4560-b078-c1e6a6a26be9" />
+<img width="1392" height="752" alt="Obscurize" src="https://github.com/fluffybunnies-h4x/Obscurize/blob/main/Obscurize.png" />
 
 
 # Obscurize
