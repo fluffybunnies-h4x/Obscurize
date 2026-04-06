@@ -105,6 +105,8 @@ Obscurize exploits this behaviour in two directions:
 | `HKLM\SOFTWARE\VMware Inc.\VMware Tools` | Registry write | Created (presence check) |
 | `HKLM\SOFTWARE\Oracle\VirtualBox Guest Additions` | Registry write | Created (presence check) |
 | `%TEMP%\mapping.csv`, `VBE_marker.tmp` | Filesystem | **Not** created (absence triggers DEADVAX abort) |
+| PowerShell `Get-WmiObject` / `Get-CimInstance` | profile.ps1 hook | Returns VMware hardware strings + dynamic `PartOfDomain` / `Domain` from registry |
+| `CreateProcessW/A` (PowerShell spawn) | API hook | Strips `-NoProfile` flag so profile.ps1 always loads |
 | `NetGetJoinInformation` (`Win32_ComputerSystem.PartOfDomain`) | API hook | `WORKGROUP` / `PartOfDomain: False` |
 
 ### Trap Mode (appear as real hardware)
@@ -258,6 +260,15 @@ by token and silently removes any `-noprofile` / `-nop` / `-nopr` token
 (case-insensitive prefix match, minimum 3 body characters) before the child
 process is created.
 
+**EnumDisplaySettingsW robustness** — The hook calls the original
+`EnumDisplaySettingsW` to populate other `DEVMODE` fields (bit depth,
+refresh rate) but does not bail out if the original returns `FALSE`. VMware's
+virtual display driver can return `FALSE` for `ENUM_CURRENT_SETTINGS` even
+when a display is present. By always returning `TRUE` with the spoofed
+resolution for `ENUM_CURRENT_SETTINGS` and `ENUM_REGISTRY_SETTINGS` queries,
+the hook remains effective in VMs where the underlying driver would otherwise
+cause callers to receive a failure code and skip the resolution check entirely.
+
 **Domain spoofing is mode-independent** — The `NetGetJoinInformation` hook is
 active in both Defensive and Trap modes and is controlled by a separate toggle.
 This reflects the real-world threat pattern: domain-join checks (as seen in
@@ -362,7 +373,7 @@ Obscurize/
 ├── ObscurizeAgent/
 │   ├── Agent.c / .h                ← DLL entry point, injection marker
 │   ├── Config.c / .h               ← Registry config reader (1 s poll)
-│   ├── Hooks.c / .h                ← All 20 Detours API hooks
+│   ├── Hooks.c / .h                ← All 21 Detours API hooks
 │   ├── Spoof.c / .h                ← Lookup tables, artefact install/remove
 │   ├── SmbiosSpoof.c / .h          ← Raw SMBIOS (RSMB) table patching
 │   ├── ObscurizeAgent-x86.vcxproj
@@ -386,11 +397,54 @@ Obscurize/
 │   ├── MainWindow.cs               ← Dark-theme control panel window
 │   └── ObscurizeGUI.csproj
 │
+├── Demo-Obscurize.ps1              ← PowerShell demo / verification script
 └── r77-rootkit/r77-rootkit-master/ ← Reference only (not modified)
     ├── r77api/                     ← Injection engine + NT API headers
     ├── r77/detours.h
     └── SlnBin/x86|x64/detours.lib
 ```
+
+---
+
+## Demo Script
+
+`Demo-Obscurize.ps1` is an operator verification script that exercises every
+active spoof and reports pass/fail against the expected values for the current
+mode. Run it from an **elevated PowerShell session** after the service is
+running.
+
+```powershell
+.\Demo-Obscurize.ps1
+```
+
+The script reads the active mode and domain toggle state directly from
+`HKLM\SOFTWARE\ObscurizeConfig`, then runs 22 checks across 9 categories:
+
+| Section | Checks | Interception method |
+|---|---|---|
+| 1. Identity | Username, Computer Name | `[HOOK]` P/Invoke |
+| 2. Memory | Reported RAM | `[HOOK]` P/Invoke |
+| 3. Display Resolution | Width × Height | `[HOOK]` P/Invoke |
+| 4. Domain Join | `PartOfDomain`, `Domain` | `[HOOK]` P/Invoke + `[WMI]` profile.ps1 |
+| 5. Hardware Identity | Manufacturer, Model, BIOS, UUID, Serial, CPU | `[WMI]` profile.ps1 |
+| 6. Storage | Disk model | `[WMI]` profile.ps1 |
+| 7. Network Adapter | NIC name + MAC OUI | `[WMI]` profile.ps1 + `[HOOK]` note |
+| 8. GPU | Name | `[WMI]` profile.ps1 |
+| 9. Registry BIOS | Vendor, Manufacturer, Product | `[REG]` direct read |
+
+Check categories:
+
+- `[HOOK]` — intercepted by the Agent DLL; requires the Agent to be injected
+  into the PowerShell process. Open a fresh terminal after starting the service
+  to ensure injection has occurred.
+- `[WMI]` — intercepted by `profile.ps1`; works in any PS session that loaded
+  the profile at startup. Open a new terminal after switching modes so the
+  updated profile is loaded.
+- `[REG]` — persistent registry write; visible immediately with no injection
+  required.
+
+Section 10 lists known gaps (checks not currently spoofed) with suggested
+fixes for each.
 
 ---
 
