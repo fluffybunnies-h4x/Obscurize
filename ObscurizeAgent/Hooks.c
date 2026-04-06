@@ -327,12 +327,21 @@ static BOOL WINAPI HookedEnumDisplaySettingsW(LPCWSTR lpszDeviceName,
                                                DWORD   iModeNum,
                                                LPDEVMODEW lpDevMode)
 {
-    BOOL result = OriginalEnumDisplaySettingsW(lpszDeviceName, iModeNum, lpDevMode);
-    if (!result || !ObsIsEnabled()) return result;
+    if (!ObsIsEnabled())
+        return OriginalEnumDisplaySettingsW(lpszDeviceName, iModeNum, lpDevMode);
 
-    // Only alter the ENUM_CURRENT_SETTINGS / ENUM_REGISTRY_SETTINGS queries
+    // Pass through enumeration of specific mode indices unchanged.
     if (iModeNum != ENUM_CURRENT_SETTINGS && iModeNum != ENUM_REGISTRY_SETTINGS)
-        return result;
+        return OriginalEnumDisplaySettingsW(lpszDeviceName, iModeNum, lpDevMode);
+
+    // For current/registry settings queries, call the original to populate other
+    // DEVMODE fields (dmBitsPerPel, dmDisplayFrequency, etc.) but always return
+    // the spoofed resolution regardless of whether the original succeeds.
+    // VMware virtual displays can return FALSE for ENUM_CURRENT_SETTINGS even
+    // when a display is present, which would otherwise prevent spoofing.
+    OriginalEnumDisplaySettingsW(lpszDeviceName, iModeNum, lpDevMode);
+
+    if (!lpDevMode) return FALSE;
 
     DWORD w, h;
     ObsGetSpoofResolution(&w, &h);
