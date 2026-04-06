@@ -106,6 +106,7 @@ static VOID  (WINAPI *OriginalGlobalMemoryStatusEx)(LPMEMORYSTATUSEX)          =
 
 // user32
 static BOOL  (WINAPI *OriginalEnumDisplaySettingsW)(LPCWSTR, DWORD, LPDEVMODEW) = NULL;
+static int   (WINAPI *OriginalGetSystemMetrics)(int)                            = NULL;
 
 // iphlpapi
 static ULONG (WINAPI *OriginalGetAdaptersAddresses)(ULONG, ULONG, PVOID,
@@ -348,6 +349,24 @@ static BOOL WINAPI HookedEnumDisplaySettingsW(LPCWSTR lpszDeviceName,
     lpDevMode->dmPelsWidth  = w;
     lpDevMode->dmPelsHeight = h;
     return TRUE;
+}
+
+// ------------------------------------------------------------
+//  GetSystemMetrics
+//  SM_CXSCREEN (0) / SM_CYSCREEN (1) return display dimensions.
+//  Complements EnumDisplaySettingsW for callers that use this path.
+//  Defensive: 800×600    Trap: 1920×1080
+// ------------------------------------------------------------
+static int WINAPI HookedGetSystemMetrics(int nIndex)
+{
+    if (!ObsIsEnabled()) return OriginalGetSystemMetrics(nIndex);
+    if (nIndex == SM_CXSCREEN || nIndex == SM_CYSCREEN)
+    {
+        DWORD w, h;
+        ObsGetSpoofResolution(&w, &h);
+        return (nIndex == SM_CXSCREEN) ? (int)w : (int)h;
+    }
+    return OriginalGetSystemMetrics(nIndex);
 }
 
 // ------------------------------------------------------------
@@ -1377,6 +1396,7 @@ VOID InitializeHooks(VOID)
     OriginalGetComputerNameExA     = (BOOL  (WINAPI*)(COMPUTER_NAME_FORMAT,LPSTR,LPDWORD))  RESOLVE_K32(GetComputerNameExA);
     OriginalGlobalMemoryStatusEx   = (VOID  (WINAPI*)(LPMEMORYSTATUSEX))             RESOLVE_K32(GlobalMemoryStatusEx);
     OriginalEnumDisplaySettingsW   = (BOOL  (WINAPI*)(LPCWSTR,DWORD,LPDEVMODEW))     RESOLVE_USER(EnumDisplaySettingsW);
+    OriginalGetSystemMetrics       = (int   (WINAPI*)(int))                           RESOLVE_USER(GetSystemMetrics);
     OriginalGetAdaptersAddresses   = (ULONG (WINAPI*)(ULONG,ULONG,PVOID,PIP_ADAPTER_ADDRESSES,PULONG)) RESOLVE_IPHLP(GetAdaptersAddresses);
     OriginalGetAdaptersInfo        = (DWORD (WINAPI*)(PIP_ADAPTER_INFO,PULONG))       RESOLVE_IPHLP(GetAdaptersInfo);
     OriginalEnumServicesStatusExW  = (BOOL  (WINAPI*)(SC_HANDLE,SC_ENUM_TYPE,DWORD,DWORD,LPBYTE,DWORD,LPDWORD,LPDWORD,LPDWORD,LPCWSTR)) RESOLVE_ADV(EnumServicesStatusExW);
@@ -1401,6 +1421,7 @@ VOID InitializeHooks(VOID)
     if (OriginalGetComputerNameExA)    DetourAttach(&(PVOID)OriginalGetComputerNameExA,    HookedGetComputerNameExA);
     if (OriginalGlobalMemoryStatusEx)  DetourAttach(&(PVOID)OriginalGlobalMemoryStatusEx,  HookedGlobalMemoryStatusEx);
     if (OriginalEnumDisplaySettingsW)  DetourAttach(&(PVOID)OriginalEnumDisplaySettingsW,  HookedEnumDisplaySettingsW);
+    if (OriginalGetSystemMetrics)      DetourAttach(&(PVOID)OriginalGetSystemMetrics,      HookedGetSystemMetrics);
     if (OriginalGetAdaptersAddresses)  DetourAttach(&(PVOID)OriginalGetAdaptersAddresses,  HookedGetAdaptersAddresses);
     if (OriginalGetAdaptersInfo)       DetourAttach(&(PVOID)OriginalGetAdaptersInfo,       HookedGetAdaptersInfo);
     if (OriginalEnumServicesStatusExW) DetourAttach(&(PVOID)OriginalEnumServicesStatusExW, HookedEnumServicesStatusExW);
@@ -1434,6 +1455,7 @@ VOID UninitializeHooks(VOID)
     if (OriginalGetComputerNameExA)    DetourDetach(&(PVOID)OriginalGetComputerNameExA,    HookedGetComputerNameExA);
     if (OriginalGlobalMemoryStatusEx)  DetourDetach(&(PVOID)OriginalGlobalMemoryStatusEx,  HookedGlobalMemoryStatusEx);
     if (OriginalEnumDisplaySettingsW)  DetourDetach(&(PVOID)OriginalEnumDisplaySettingsW,  HookedEnumDisplaySettingsW);
+    if (OriginalGetSystemMetrics)      DetourDetach(&(PVOID)OriginalGetSystemMetrics,      HookedGetSystemMetrics);
     if (OriginalGetAdaptersAddresses)  DetourDetach(&(PVOID)OriginalGetAdaptersAddresses,  HookedGetAdaptersAddresses);
     if (OriginalGetAdaptersInfo)       DetourDetach(&(PVOID)OriginalGetAdaptersInfo,       HookedGetAdaptersInfo);
     if (OriginalEnumServicesStatusExW) DetourDetach(&(PVOID)OriginalEnumServicesStatusExW, HookedEnumServicesStatusExW);

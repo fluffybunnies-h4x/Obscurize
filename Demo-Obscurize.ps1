@@ -132,6 +132,10 @@ public class ObsDemo {
     public static extern bool EnumDisplaySettingsW(string devName, int modeNum, IntPtr devMode);
 
 
+    // GetSystemMetrics
+    [DllImport("user32.dll")]
+    public static extern int GetSystemMetrics(int nIndex);
+
     // NetGetJoinInformation
     [DllImport("netapi32.dll", CharSet=CharSet.Unicode)]
     public static extern int NetGetJoinInformation(string lpServer, out IntPtr lpNameBuffer, out int pBufferType);
@@ -180,7 +184,7 @@ Write-Info  "  Reported value" "$ramGb GB  (expected $expStr)"
 #  SECTION 3 - Display Resolution  [HOOK]
 # ---------------------------------------------------------------------------
 
-Write-Header "3. DISPLAY RESOLUTION  [HOOK - requires Agent injection]"
+Write-Header "3. DISPLAY RESOLUTION  [HOOK - requires Agent injection + WMI via profile.ps1]"
 
 # Allocate unmanaged memory for DEVMODE (220 bytes), set dmSize, call, read results.
 # dmSize at offset 68 (ushort), dmPelsWidth at 172 (uint), dmPelsHeight at 176 (uint).
@@ -200,6 +204,10 @@ try {
 $resStr = "$resW x $resH"
 $expRes = if ($defMode) { "800 x 600" } else { "1920 x 1080" }
 Write-Check "EnumDisplaySettingsW" $expRes $resStr "HOOK"
+
+$smW = [ObsDemo]::GetSystemMetrics(0)   # SM_CXSCREEN
+$smH = [ObsDemo]::GetSystemMetrics(1)   # SM_CYSCREEN
+Write-Check "GetSystemMetrics (SM_CXSCREEN/SM_CYSCREEN)" $expRes "$smW x $smH" "HOOK"
 
 # ---------------------------------------------------------------------------
 #  SECTION 4 - Domain Join  [HOOK + WMI]
@@ -303,19 +311,31 @@ Write-Host "  NOTE: profile.ps1 only renames adapters matching VMware|vmxnet|Vir
 Write-Host "        Intel E1000 (82574L) emulation is not renamed - MAC OUI is the reliable indicator." -ForegroundColor DarkGray
 
 Write-Host ""
-Write-Host "  MAC OUI check (HOOK - GetAdaptersAddresses / GetAdaptersInfo):" -ForegroundColor DarkGray
+$expOUI = if ($defMode) { "00:0C:29" } else { "00:1B:21" }
+
+Write-Host ""
+Write-Host "  MAC OUI - GetAdaptersAddresses/GetAdaptersInfo (HOOK):" -ForegroundColor DarkGray
 $macs = @(Get-WmiObject Win32_NetworkAdapterConfiguration |
           Where-Object { $_.MACAddress -ne $null } |
           Select-Object -ExpandProperty MACAddress)
-$expOUI = if ($defMode) { "00:0C:29" } else { "00:1B:21" }
 foreach ($mac in $macs) {
     $oui  = ($mac -split "[:\-]" | Select-Object -First 3) -join ":"
     $pass = $oui -ieq $expOUI
     $col  = if ($pass) { "Green" } else { "Yellow" }
-    Write-Host ("    MAC: {0}  OUI: {1}  (expected {2})" -f $mac, $oui, $expOUI) -ForegroundColor $col
+    Write-Host ("    iphlpapi hook  MAC: {0}  OUI: {1}  (expected {2})" -f $mac, $oui, $expOUI) -ForegroundColor $col
 }
-Write-Host "  NOTE: WMI MACAddress bypasses the GetAdaptersAddresses hook." -ForegroundColor DarkGray
-Write-Host "        Run 'ipconfig /all' from an injected process to verify OUI." -ForegroundColor DarkGray
+
+Write-Host ""
+Write-Host "  MAC OUI - Win32_NetworkAdapterConfiguration (WMI):" -ForegroundColor DarkGray
+$nacMacs = @(Get-WmiObject Win32_NetworkAdapterConfiguration |
+             Where-Object { $_.MACAddress -ne $null } |
+             Select-Object -ExpandProperty MACAddress)
+foreach ($mac in $nacMacs) {
+    $oui  = ($mac -split "[:\-]" | Select-Object -First 3) -join ":"
+    $pass = $oui -ieq $expOUI
+    $col  = if ($pass) { "Green" } else { "Yellow" }
+    Write-Host ("    profile.ps1 hook  MAC: {0}  OUI: {1}  (expected {2})" -f $mac, $oui, $expOUI) -ForegroundColor $col
+}
 
 # ---------------------------------------------------------------------------
 #  SECTION 8 - GPU  [WMI]
@@ -323,10 +343,13 @@ Write-Host "        Run 'ipconfig /all' from an injected process to verify OUI."
 
 Write-Header "8. GPU  [WMI - intercepted by profile.ps1]"
 
-$gpu = Get-WmiObject Win32_VideoController | Select-Object -First 1
+$gpu    = Get-WmiObject Win32_VideoController | Select-Object -First 1
 $expGpu = if ($defMode) { "VMware SVGA 3D" } else { "Intel(R) Iris(R) Xe Graphics" }
-Write-Check "Win32_VideoController.Name" $expGpu $gpu.Name "WMI"
-Write-Info  "  Resolution (not spoofed via WMI)" "$($gpu.CurrentHorizontalResolution) x $($gpu.CurrentVerticalResolution)" "WMI gap"
+$expResW = if ($defMode) { 800  } else { 1920 }
+$expResH = if ($defMode) { 600  } else { 1080 }
+Write-Check "Win32_VideoController.Name"                      $expGpu  $gpu.Name                          "WMI"
+Write-Check "Win32_VideoController.CurrentHorizontalResolution" $expResW "$($gpu.CurrentHorizontalResolution)" "WMI"
+Write-Check "Win32_VideoController.CurrentVerticalResolution"   $expResH "$($gpu.CurrentVerticalResolution)"   "WMI"
 
 # ---------------------------------------------------------------------------
 #  SECTION 9 - Registry BIOS artefacts  [always visible, no injection needed]
@@ -355,20 +378,11 @@ try {
 
 Write-Header "10. KNOWN GAPS  [not currently spoofed]"
 
-Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
-$screenW = try { [System.Windows.Forms.Screen]::PrimaryScreen.Bounds.Width  } catch { "?" }
-$screenH = try { [System.Windows.Forms.Screen]::PrimaryScreen.Bounds.Height } catch { "?" }
-
-Write-Host "  GetSystemMetrics SM_CXSCREEN / SM_CYSCREEN" -ForegroundColor Yellow
-Write-Host "    Real value: $screenW x $screenH" -ForegroundColor DarkYellow
-Write-Host "    Fix: add GetSystemMetrics hook in Hooks.c" -ForegroundColor DarkGray
+Write-Host "  CPUID / RDTSC timing - CPU-level VM detection bypasses all Win32/NT hooks." -ForegroundColor Yellow
+Write-Host "    Requires a kernel driver (v2)." -ForegroundColor DarkGray
 Write-Host ""
-Write-Host "  Win32_VideoController.CurrentHorizontalResolution / CurrentVerticalResolution" -ForegroundColor Yellow
-Write-Host "    Real value: $($gpu.CurrentHorizontalResolution) x $($gpu.CurrentVerticalResolution)" -ForegroundColor DarkYellow
-Write-Host "    Fix: add resolution fields to Win32_VideoController block in ArtefactManager.c" -ForegroundColor DarkGray
-Write-Host ""
-Write-Host "  Win32_NetworkAdapterConfiguration.MACAddress (WMI path)" -ForegroundColor Yellow
-Write-Host "    The MAC OUI hook covers GetAdaptersAddresses/GetAdaptersInfo but not WMI MAC." -ForegroundColor DarkGray
+Write-Host "  WMI via raw COM (IWbemServices::ExecQuery) in non-PowerShell processes" -ForegroundColor Yellow
+Write-Host "    profile.ps1 only covers PowerShell callers." -ForegroundColor DarkGray
 
 # ---------------------------------------------------------------------------
 #  Summary

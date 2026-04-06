@@ -105,7 +105,7 @@ Obscurize exploits this behaviour in two directions:
 | `HKLM\SOFTWARE\VMware Inc.\VMware Tools` | Registry write | Created (presence check) |
 | `HKLM\SOFTWARE\Oracle\VirtualBox Guest Additions` | Registry write | Created (presence check) |
 | `%TEMP%\mapping.csv`, `VBE_marker.tmp` | Filesystem | **Not** created (absence triggers DEADVAX abort) |
-| PowerShell `Get-WmiObject` / `Get-CimInstance` | profile.ps1 hook | Returns VMware hardware strings + dynamic `PartOfDomain` / `Domain` from registry |
+| PowerShell `Get-WmiObject` / `Get-CimInstance` | profile.ps1 hook | Returns VMware hardware strings, 800×600 resolution, VMware MAC OUI + dynamic `PartOfDomain` / `Domain` from registry |
 | `CreateProcessW/A` (PowerShell spawn) | API hook | Strips `-NoProfile` flag so profile.ps1 always loads |
 | `NetGetJoinInformation` (`Win32_ComputerSystem.PartOfDomain`) | API hook | `WORKGROUP` / `PartOfDomain: False` |
 
@@ -125,7 +125,7 @@ Obscurize exploits this behaviour in two directions:
 | `NtEnumerateKey` / `NtQueryKey` | NT hook | VM vendor registry subkeys filtered from `HKLM\SOFTWARE` |
 | VMware / VirtualBox registry keys | Registry delete | Removed |
 | `%TEMP%\mapping.csv`, `VBE_marker.tmp` | Filesystem | Created (presence satisfies DEADVAX check) |
-| PowerShell `Get-WmiObject` / `Get-CimInstance` | profile.ps1 hook | Returns spoofed Dell hardware strings + dynamic `PartOfDomain` / `Domain` from registry |
+| PowerShell `Get-WmiObject` / `Get-CimInstance` | profile.ps1 hook | Returns spoofed Dell hardware strings, 1920×1080 resolution, Intel MAC OUI + dynamic `PartOfDomain` / `Domain` from registry |
 | `CreateProcessW/A` (PowerShell spawn) | API hook | Strips `-NoProfile` flag so profile.ps1 always loads |
 | `systeminfo.exe` stdout | WriteConsoleW hook | Replaces VMware strings with Dell strings in terminal output |
 | `NetGetJoinInformation` (`Win32_ComputerSystem.PartOfDomain`) | API hook | `CORP.DEV` / `PartOfDomain: True` (when Domain toggle is ON) |
@@ -192,7 +192,7 @@ under `HKLM\SOFTWARE\ObscurizeConfig`.
 
 ## API Hooks Reference
 
-The Agent installs up to 21 Detours hooks per process. The WriteFile /
+The Agent installs up to 22 Detours hooks per process. The WriteFile /
 WriteConsoleA / WriteConsoleW hooks are only installed when the host process
 is `systeminfo.exe`.
 
@@ -204,6 +204,7 @@ is `systeminfo.exe`.
 | `GetComputerNameExA` | kernel32 | Returns `DESKTOP-ANALY5T` | Returns config computer name |
 | `GlobalMemoryStatusEx` | kernel32 | Reports 2 048 MB RAM | Reports 16 384 MB RAM |
 | `EnumDisplaySettingsW` | user32 | Reports 800×600 | Reports 1920×1080 |
+| `GetSystemMetrics` | user32 | Reports 800×600 (SM_CXSCREEN/SM_CYSCREEN) | Reports 1920×1080 |
 | `GetAdaptersAddresses` | iphlpapi | OUI `00:0C:29` (VMware) | OUI `00:1B:21` (Intel) |
 | `GetAdaptersInfo` | iphlpapi | OUI `00:0C:29` (VMware) | OUI `00:1B:21` (Intel) |
 | `EnumServicesStatusExW` | advapi32 | Pass-through | Filters VM service names |
@@ -373,7 +374,7 @@ Obscurize/
 ├── ObscurizeAgent/
 │   ├── Agent.c / .h                ← DLL entry point, injection marker
 │   ├── Config.c / .h               ← Registry config reader (1 s poll)
-│   ├── Hooks.c / .h                ← All 21 Detours API hooks
+│   ├── Hooks.c / .h                ← All 22 Detours API hooks
 │   ├── Spoof.c / .h                ← Lookup tables, artefact install/remove
 │   ├── SmbiosSpoof.c / .h          ← Raw SMBIOS (RSMB) table patching
 │   ├── ObscurizeAgent-x86.vcxproj
@@ -418,18 +419,18 @@ running.
 ```
 
 The script reads the active mode and domain toggle state directly from
-`HKLM\SOFTWARE\ObscurizeConfig`, then runs 22 checks across 9 categories:
+`HKLM\SOFTWARE\ObscurizeConfig`, then runs checks across 9 categories:
 
 | Section | Checks | Interception method |
 |---|---|---|
 | 1. Identity | Username, Computer Name | `[HOOK]` P/Invoke |
 | 2. Memory | Reported RAM | `[HOOK]` P/Invoke |
-| 3. Display Resolution | Width × Height | `[HOOK]` P/Invoke |
+| 3. Display Resolution | `EnumDisplaySettingsW`, `GetSystemMetrics` | `[HOOK]` P/Invoke |
 | 4. Domain Join | `PartOfDomain`, `Domain` | `[HOOK]` P/Invoke + `[WMI]` profile.ps1 |
 | 5. Hardware Identity | Manufacturer, Model, BIOS, UUID, Serial, CPU | `[WMI]` profile.ps1 |
 | 6. Storage | Disk model | `[WMI]` profile.ps1 |
-| 7. Network Adapter | NIC name + MAC OUI | `[WMI]` profile.ps1 + `[HOOK]` note |
-| 8. GPU | Name | `[WMI]` profile.ps1 |
+| 7. Network Adapter | NIC name, MAC OUI (iphlpapi + WMI) | `[HOOK]` + `[WMI]` profile.ps1 |
+| 8. GPU | Name, resolution | `[WMI]` profile.ps1 |
 | 9. Registry BIOS | Vendor, Manufacturer, Product | `[REG]` direct read |
 
 Check categories:

@@ -142,6 +142,9 @@ static LPSTR BuildPsProfile(DWORD mode)
     LPCSTR diskModel   = defensive ? "VMware Virtual disk"                   : "SAMSUNG MZVL2512HCJQ-00B00";
     LPCSTR nicName     = defensive ? "VMware VMXNET3 Ethernet Adapter"       : "Intel(R) Wi-Fi 6E AX211 160MHz";
     LPCSTR gpuName     = defensive ? "VMware SVGA 3D"                        : "Intel(R) Iris(R) Xe Graphics";
+    int    screenW     = defensive ? 800                                      : 1920;
+    int    screenH     = defensive ? 600                                      : 1080;
+    LPCSTR macOuiStr   = defensive ? "00:0C:29"                              : "00:1B:21";
 
     // Compute BIOS date in WMI format (YYYYMMDD000000.000000+000)
     // Defensive: 20150702  Trap: 20230414
@@ -250,6 +253,21 @@ static LPSTR BuildPsProfile(DWORD mode)
         "        if ($r.Name -match 'VMware|SVGA') {\r\n"
         "            $r.Name = $global:OBS_GpuName; $r.Description = $global:OBS_GpuName\r\n"
         "        }\r\n"
+        "        $r.CurrentHorizontalResolution = %d\r\n"
+        "        $r.CurrentVerticalResolution   = %d\r\n"
+        "        return $r\r\n"
+        "    }\r\n"
+        "    elseif ($Class -eq 'Win32_NetworkAdapterConfiguration' -or $Query -like '*Win32_NetworkAdapterConfiguration*') {\r\n"
+        "        $r = & $global:OrigGetWmi -Class Win32_NetworkAdapterConfiguration -Namespace $Namespace\r\n"
+        "        $oui = '%s'\r\n"
+        "        foreach ($a in $r) {\r\n"
+        "            if ($a.MACAddress -ne $null) {\r\n"
+        "                $parts = $a.MACAddress -split ':'\r\n"
+        "                if ($parts.Count -eq 6) {\r\n"
+        "                    $a.MACAddress = \"${oui}:$($parts[3]):$($parts[4]):$($parts[5])\"\r\n"
+        "                }\r\n"
+        "            }\r\n"
+        "        }\r\n"
         "        return $r\r\n"
         "    }\r\n"
         "    else { & $global:OrigGetWmi @PSBoundParameters }\r\n"
@@ -280,7 +298,8 @@ static LPSTR BuildPsProfile(DWORD mode)
     int needed = _scprintf(tmpl,
         defensive ? "Defensive" : "Trap",
         sysMfg, sysProd, biosVendor, biosVer, biosDate, biosDateWmi,
-        bbMfg, bbProd, cpuName, uuid, serialNum, diskModel, nicName, gpuName);
+        bbMfg, bbProd, cpuName, uuid, serialNum, diskModel, nicName, gpuName,
+        screenW, screenH, macOuiStr);
     if (needed <= 0) return NULL;
 
     LPSTR buf = (LPSTR)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)needed + 1);
@@ -289,7 +308,8 @@ static LPSTR BuildPsProfile(DWORD mode)
     sprintf_s(buf, (SIZE_T)needed + 1, tmpl,
         defensive ? "Defensive" : "Trap",
         sysMfg, sysProd, biosVendor, biosVer, biosDate, biosDateWmi,
-        bbMfg, bbProd, cpuName, uuid, serialNum, diskModel, nicName, gpuName);
+        bbMfg, bbProd, cpuName, uuid, serialNum, diskModel, nicName, gpuName,
+        screenW, screenH, macOuiStr);
 
     return buf;
 }
