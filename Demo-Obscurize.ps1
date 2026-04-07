@@ -227,8 +227,8 @@ if ($ret -eq 0 -and $nameBuf -ne [IntPtr]::Zero) {
 $joinType = switch ($bufType) { 2 { "Workgroup" } 3 { "Domain" } default { "Unknown ($bufType)" } }
 
 if ($domEnabled) {
-    Write-Check "NetGetJoinInformation (name)"       $spoofDomain "HOOK"  $joinName
-    Write-Check "NetGetJoinInformation (type)"       "Domain"     "HOOK"  $joinType
+    Write-Check "NetGetJoinInformation (name)"       $spoofDomain  $joinName  "HOOK"
+    Write-Check "NetGetJoinInformation (type)"       "Domain"      $joinType  "HOOK"
 } else {
     Write-Check "NetGetJoinInformation (name)"       "WORKGROUP"  $joinName  "HOOK"
     Write-Check "NetGetJoinInformation (type)"       "Workgroup"  $joinType  "HOOK"
