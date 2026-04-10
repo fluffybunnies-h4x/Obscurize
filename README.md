@@ -71,7 +71,7 @@ Obscurize exploits this behaviour in two directions:
                │  Reflective DLL injection (r77api InjectDll)
 ┌──────────────▼──────────────────────────────────────────────────┐
 │  ObscurizeAgent32/64.dll  (injected into every user process)    │
-│  • Microsoft Detours hooks on Win32 + NT APIs (21 hooks total)  │
+│  • Microsoft Detours hooks on Win32 + NT APIs (22 hooks total)  │
 │  • Reads config from registry every 1 s                         │
 │  • Hooks are installed/removed without restarting the process   │
 └─────────────────────────────────────────────────────────────────┘
@@ -342,21 +342,111 @@ mkdir output 2>nul
 
 ---
 
-## Service Installation
+## Recommended Deployment
 
-Run the following from an elevated Command Prompt:
+This section covers the recommended way to deploy Obscurize on a production
+or lab system so that both the service and the control panel start
+automatically without any manual steps after each reboot.
+
+### 1. Copy binaries to the install directory
+
+The default install path is `C:\ProgramData\Obscurize`. Copy the two
+runtime binaries there after building:
+
+```
+C:\ProgramData\Obscurize\
+    ObscurizeService.exe
+    ObscurizeGUI.exe
+```
+
+The Agent DLLs are embedded inside `ObscurizeService.exe` as resources —
+no separate DLL files are needed on disk.
+
+### 2. Run ObscurizeInitializer.ps1
+
+`ObscurizeInitializer.ps1` (included in the repo root) performs all
+one-time setup in a single step. Run it once from an elevated PowerShell
+session on the target system:
+
+```powershell
+Set-ExecutionPolicy Bypass -Scope Process -Force
+.\ObscurizeInitializer.ps1
+```
+
+The script will:
+
+1. Verify `ObscurizeService.exe` and `ObscurizeGUI.exe` exist at the
+   install path and abort with a clear message if either is missing.
+2. Register `ObscurizeService` as a Windows Service set to start
+   automatically with the system (`LocalSystem`, auto-start). If the
+   service already exists the binary path is updated in place.
+3. Start the service immediately.
+4. Create a Task Scheduler task (`\Obscurize\ObscurizeGUI`) that
+   launches `ObscurizeGUI.exe` at logon for any member of
+   `BUILTIN\Administrators` — elevated, without a UAC prompt.
+5. Launch `ObscurizeGUI.exe` immediately so the operator can verify
+   the initial state.
+
+To use a non-default install path:
+
+```powershell
+.\ObscurizeInitializer.ps1 -InstallPath "D:\Tools\Obscurize"
+```
+
+### 3. First-run behaviour
+
+On the very first run the service creates
+`HKLM\SOFTWARE\ObscurizeConfig` with these defaults:
+
+| Value | Default |
+|---|---|
+| `Enabled` | `0` (off) |
+| `Mode` | `1` (Defensive) |
+| `DomainEnabled` | `0` (off) |
+
+The control panel will open showing **INACTIVE**. Click the power button
+to activate, select a mode, and optionally enable the domain spoof.
+All settings persist across reboots — the service resumes in whatever
+state it was last left.
+
+### Uninstalling
+
+```powershell
+# Stop and remove the service
+Stop-Service ObscurizeService -Force
+sc.exe delete ObscurizeService
+
+# Remove the GUI auto-start task
+Unregister-ScheduledTask -TaskName "ObscurizeGUI" -TaskPath "\Obscurize\" -Confirm:$false
+
+# Remove config and artefacts from the registry
+reg delete "HKLM\SOFTWARE\ObscurizeConfig" /f
+reg delete "HKLM\SOFTWARE\VMware, Inc." /f 2>nul
+reg delete "HKLM\SOFTWARE\Oracle" /f 2>nul
+
+# Delete the install directory
+Remove-Item "C:\ProgramData\Obscurize" -Recurse -Force
+```
+
+---
+
+## Manual Service Installation
+
+For environments where the initializer script cannot be used, the
+service can be registered manually from an elevated Command Prompt:
 
 ```cmd
 sc create ObscurizeService ^
-    binPath= "C:\path\to\output\ObscurizeService.exe" ^
+    binPath= "C:\ProgramData\Obscurize\ObscurizeService.exe" ^
     start= auto ^
+    obj= LocalSystem ^
     DisplayName= "Obscurize Defensive Deception Service"
 
 sc start ObscurizeService
 ```
 
-Then launch `output\ObscurizeGUI.exe` (UAC prompt expected — it needs
-Administrator to reach the LocalSystem pipe and write to HKLM).
+Then launch `ObscurizeGUI.exe` (requires Administrator — it needs to
+reach the LocalSystem pipe and write to HKLM).
 
 ---
 
@@ -398,6 +488,7 @@ Obscurize/
 │   ├── MainWindow.cs               ← Dark-theme control panel window
 │   └── ObscurizeGUI.csproj
 │
+├── ObscurizeInitializer.ps1        ← One-shot deployment script (service + GUI task)
 ├── Demo-Obscurize.ps1              ← PowerShell demo / verification script
 └── r77-rootkit/r77-rootkit-master/ ← Reference only (not modified)
     ├── r77api/                     ← Injection engine + NT API headers
@@ -461,11 +552,59 @@ query also returns a 4-byte reply.
 | `OBS_CTRL_DISABLE` | `0x0002` | Disable spoofing |
 | `OBS_CTRL_SET_MODE_DEFENSIVE` | `0x0003` | Switch to Defensive mode |
 | `OBS_CTRL_SET_MODE_TRAP` | `0x0004` | Switch to Trap mode |
-| `OBS_CTRL_QUERY_STATUS` | `0x0005` | Query status (reply: 0=disabled, 2=defensive, 3=trap) |
+| `OBS_CTRL_QUERY_STATUS` | `0x0005` | Query status (reply: 1=disabled, 2=defensive, 3=trap) |
 | `OBS_CTRL_INJECT_ALL` | `0x0006` | Force inject into all running processes |
 | `OBS_CTRL_DETACH_ALL` | `0x0007` | Detach from all processes |
 | `OBS_CTRL_DOMAIN_ENABLE` | `0x0008` | Enable domain spoofing (`PartOfDomain: True`, domain `CORP.DEV`) |
 | `OBS_CTRL_DOMAIN_DISABLE` | `0x0009` | Disable domain spoofing (`PartOfDomain: False`, `WORKGROUP`) |
+
+---
+
+## Security
+
+### Control pipe access control
+
+The control pipe (`\\.\pipe\ObscurizeCtrl`) is created with a NULL DACL so
+that any process — including the GUI running in a user session — can connect
+to a service running as LocalSystem. Access control is enforced at the
+protocol level rather than the ACL level:
+
+- **Status query** (`OBS_CTRL_QUERY_STATUS`) is permitted from any integrity
+  level. This allows the tray icon's 2-second status poller to display current
+  state without requiring elevation.
+- **All mutating commands** (enable, disable, mode switch, inject, detach,
+  domain toggle) require the calling process to be running at **High integrity**
+  (elevated Administrator). The service verifies this by impersonating the pipe
+  client via `ImpersonateNamedPipeClient`, opening the impersonation token with
+  `OpenThreadToken`, and checking the mandatory integrity label against
+  `SECURITY_MANDATORY_HIGH_RID` (0x3000). Medium and Low integrity callers are
+  silently rejected. The GUI client connects with
+  `TokenImpersonationLevel.Impersonation` so the server can perform this check.
+
+### Configuration registry ACL
+
+`HKLM\SOFTWARE\ObscurizeConfig` is created with a DACL granting full access
+to `NT AUTHORITY\SYSTEM` (so the service can read and write its own config)
+and `BUILTIN\Administrators` (so the elevated GUI can write mode and enable
+values). Standard users and Authenticated Users have no access. This prevents
+an unprivileged process from tampering with the embedded Agent DLL blobs
+(`AgentDll32` / `AgentDll64`) stored in that key, which the service loads
+and injects into every running process.
+
+### Injection exclusions
+
+The Agent is deliberately never injected into a fixed set of processes
+regardless of mode or configuration:
+
+| Process | Reason for exclusion |
+|---|---|
+| `consent.exe` | UAC elevation broker — injection corrupts the elevation flow |
+| `winlogon.exe`, `lsass.exe`, `lsaiso.exe` | Core authentication infrastructure; PPL/Credential Guard protected |
+| `MsMpEng.exe`, `smartscreen.exe`, `SecurityHealthService.exe` | AV/EDR self-protection triggers on injection |
+| `explorer.exe`, shell experience hosts, `RuntimeBroker.exe`, `sihost.exe`, `taskhostw.exe` | NT-level registry hooks called at high frequency by the shell cause deadlocks and Explorer hangs |
+| `chrome.exe`, `msedge.exe`, `brave.exe`, `opera.exe`, `vivaldi.exe`, `firefox.exe`, `waterfox.exe` | Chromium-based browsers enable Code Integrity Guard (CIG), which blocks unsigned DLL injection and leaves the process in a broken state |
+| `OneDriveSetup.exe`, `OneDrive.exe` | Protected DLL loading during first-run user setup; injection corrupts ordinal resolution causing an error dialog on new user login |
+| `ObscurizeService.exe`, `ObscurizeGUI.exe` | Self-exclusion |
 
 ---
 

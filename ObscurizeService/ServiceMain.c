@@ -59,33 +59,46 @@ static HANDLE s_controlPipeThread = NULL;
 /// the GUI running as an admin user can write mode/enable values.
 static BOOL EnsureConfigKey(VOID)
 {
-    HKEY key = NULL;
+    HKEY  key         = NULL;
+    DWORD disposition = 0;
     LONG result = RegCreateKeyExW(
         HKEY_LOCAL_MACHINE, OBS_CONFIG_KEY, 0, NULL,
         REG_OPTION_NON_VOLATILE,
         KEY_ALL_ACCESS | KEY_WOW64_64KEY,
-        NULL, &key, NULL);
+        NULL, &key, &disposition);
 
     if (result != ERROR_SUCCESS) return FALSE;
 
-    // SDDL: Authenticated Users (AU) + BUILTIN\Administrators (BA) full control.
+    // SDDL: BUILTIN\Administrators (BA) full control only.
+    // Standard users query status via the control pipe, not by reading
+    // the registry directly.  Giving AU write access would let any
+    // unprivileged process tamper with config or overwrite the cached
+    // Agent DLL blobs.
     PSECURITY_DESCRIPTOR sd = NULL;
     ULONG sdSize = 0;
     if (ConvertStringSecurityDescriptorToSecurityDescriptorW(
-            L"D:(A;OICI;GA;;;AU)(A;OICI;GA;;;BA)",
+            L"D:(A;OICI;GA;;;SY)(A;OICI;GA;;;BA)",
             SDDL_REVISION_1, &sd, &sdSize))
     {
         RegSetKeySecurity(key, DACL_SECURITY_INFORMATION, sd);
         LocalFree(sd);
     }
 
-    // Write default values only if the key was just created.
-    DWORD defaultEnabled = 0;
-    DWORD defaultMode    = OBS_MODE_DEFENSIVE;
-    RegSetValueExW(key, OBS_CONFIG_VALUE_ENABLED, 0, REG_DWORD,
-                   (LPBYTE)&defaultEnabled, sizeof(DWORD));
-    RegSetValueExW(key, OBS_CONFIG_VALUE_MODE, 0, REG_DWORD,
-                   (LPBYTE)&defaultMode, sizeof(DWORD));
+    // Write defaults only on first-ever creation.  On subsequent service
+    // starts the existing values are preserved so the admin's last-set
+    // state (mode, enabled, domain toggle) survives reboots.
+    if (disposition == REG_CREATED_NEW_KEY)
+    {
+        DWORD defaultEnabled = 0;               // off until admin enables it
+        DWORD defaultMode    = OBS_MODE_DEFENSIVE;
+        DWORD defaultDomain  = 0;               // domain spoof off by default
+        RegSetValueExW(key, OBS_CONFIG_VALUE_ENABLED, 0, REG_DWORD,
+                       (LPBYTE)&defaultEnabled, sizeof(DWORD));
+        RegSetValueExW(key, OBS_CONFIG_VALUE_MODE, 0, REG_DWORD,
+                       (LPBYTE)&defaultMode, sizeof(DWORD));
+        RegSetValueExW(key, OBS_CONFIG_VALUE_DOMAIN_ENABLED, 0, REG_DWORD,
+                       (LPBYTE)&defaultDomain, sizeof(DWORD));
+    }
 
     RegCloseKey(key);
     return TRUE;

@@ -94,7 +94,7 @@ namespace Obscurize
                 PipeNameWithoutPrefix(),
                 PipeDirection.InOut,
                 PipeOptions.None,
-                TokenImpersonationLevel.Anonymous);
+                TokenImpersonationLevel.Impersonation);
 
         private static bool TryConnect(NamedPipeClientStream pipe)
         {

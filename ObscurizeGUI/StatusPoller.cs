@@ -34,6 +34,9 @@ namespace Obscurize
 
         private ServiceStatus _lastStatus  = ServiceStatus.ServiceOffline;
 
+        /// <summary>Last known status – used by MainWindow to sync on open.</summary>
+        internal ServiceStatus LastStatus => _lastStatus;
+
         /// <summary>Last known enabled state (convenience for tray menu toggle label).</summary>
         internal bool IsEnabled => _lastStatus == ServiceStatus.ActiveDefensive
                                 || _lastStatus == ServiceStatus.ActiveTrap;

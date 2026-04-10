@@ -236,11 +236,18 @@
 // Malware samples run in their own process, so excluding these does not
 // reduce spoofing coverage.
 #define OBS_PROCESS_EXCLUSIONS { \
-    L"winlogon.exe",             \
-    L"MsMpEng.exe",              \
-    L"MSBuild.exe",              \
+    /* Obscurize own processes */ \
     L"ObscurizeService.exe",     \
     L"ObscurizeGUI.exe",         \
+    /* Windows security / UAC infrastructure – injecting here breaks elevation */ \
+    L"consent.exe",              \
+    L"winlogon.exe",             \
+    L"lsass.exe",                \
+    L"lsaiso.exe",               \
+    /* Windows Defender / AV – injecting triggers self-protection */ \
+    L"MsMpEng.exe",              \
+    L"smartscreen.exe",          \
+    L"SecurityHealthService.exe", \
     /* Shell and UI hosts – hooking these causes Explorer hangs/crashes */ \
     L"explorer.exe",             \
     L"ShellExperienceHost.exe",  \
@@ -249,6 +256,22 @@
     L"RuntimeBroker.exe",        \
     L"sihost.exe",               \
     L"taskhostw.exe",            \
+    /* Build tools */ \
+    L"MSBuild.exe",              \
+    /* Browsers – Chromium CIG blocks unsigned DLL injection, \
+       leaving the process in a broken state on startup */    \
+    L"chrome.exe",               \
+    L"msedge.exe",               \
+    L"brave.exe",                \
+    L"opera.exe",                \
+    L"vivaldi.exe",              \
+    L"firefox.exe",              \
+    L"waterfox.exe",             \
+    /* OneDrive – setup and sync processes use protected DLL  \
+       loading; injection corrupts ordinal resolution on      \
+       first-run user login */                                \
+    L"OneDriveSetup.exe",        \
+    L"OneDrive.exe",             \
     NULL }
 
 #endif  // _OBSCURIZE_DEF_H

@@ -284,8 +284,11 @@ namespace Obscurize
             }
             catch { /* registry not yet created – leave default false */ }
 
-            UpdateStatus(ServiceStatus.ServiceOffline);
             StatusPoller.Current.StatusChanged += (_, s) => this.Invoke(new Action(() => UpdateStatus(s)));
+            // Sync with whatever the poller already knows – avoids the race where
+            // the poller transitions from ServiceOffline → ActiveDefensive before
+            // this handler is registered, leaving the window stuck on INACTIVE.
+            UpdateStatus(StatusPoller.Current.LastStatus);
 
             AppendLog("Control panel opened.", ColTextDim);
             AppendLog("Polling service status…", ColTextDim);

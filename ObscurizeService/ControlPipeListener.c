@@ -15,10 +15,13 @@
 //    - r77's CreatePublicNamedPipe sets a NULL DACL so any
 //      user can connect.  This is intentional: the GUI runs
 //      in a user session while the service runs as SYSTEM.
-//    - Commands that have security implications (inject, detach,
-//      mode switch) can optionally be locked down by checking
-//      the client's token integrity level on the pipe handle
-//      if stricter access control is required in future.
+//    - OBS_CTRL_QUERY_STATUS is allowed from any integrity level
+//      so the tray icon can display state without elevation.
+//    - All other commands (enable, disable, mode switch, inject,
+//      detach) require the client to be running at High integrity
+//      (elevated Administrator).  IsHighIntegrityClient() checks
+//      the impersonation token via GetNamedPipeClientToken and
+//      rejects Medium/Low integrity callers.
 //
 //  Thread lifecycle:
 //    The listener thread is persistent and blocks on
@@ -26,6 +29,80 @@
 //    each connection so the protocol stays one-command-per-
 //    connection – no length-prefixed framing needed.
 // ============================================================
+
+// --------------------------------------------------------
+//  Client integrity check
+// --------------------------------------------------------
+
+/// Returns TRUE if the client on the other end of the pipe is running
+/// at High integrity (i.e. an elevated Administrator process) or above.
+/// Rejects Medium/Low integrity callers – prevents unprivileged processes
+/// from sending inject/detach/mode-switch commands to the SYSTEM service.
+///
+/// Uses ImpersonateNamedPipeClient + OpenThreadToken rather than
+/// GetNamedPipeClientToken to avoid SDK version / lib forwarding issues
+/// (advapi32.lib is authoritative for both of these since Windows 2000).
+static BOOL IsHighIntegrityClient(HANDLE pipe)
+{
+    if (!ImpersonateNamedPipeClient(pipe))
+    {
+        WCHAR msg[128];
+        wsprintfW(msg, L"[Obscurize] IsHighIntegrityClient: ImpersonateNamedPipeClient FAILED err=%lu\n", GetLastError());
+        OutputDebugStringW(msg);
+        return FALSE;
+    }
+
+    HANDLE hToken  = NULL;
+    BOOL   gotToken = OpenThreadToken(GetCurrentThread(),
+                                       TOKEN_QUERY, TRUE, &hToken);
+    DWORD  openErr  = GetLastError();
+    RevertToSelf();
+
+    if (!gotToken)
+    {
+        WCHAR msg[128];
+        wsprintfW(msg, L"[Obscurize] IsHighIntegrityClient: OpenThreadToken FAILED err=%lu\n", openErr);
+        OutputDebugStringW(msg);
+        return FALSE;
+    }
+
+    DWORD dwSize = 0;
+    GetTokenInformation(hToken, TokenIntegrityLevel, NULL, 0, &dwSize);
+    if (!dwSize || GetLastError() != ERROR_INSUFFICIENT_BUFFER)
+    {
+        WCHAR msg[128];
+        wsprintfW(msg, L"[Obscurize] IsHighIntegrityClient: GetTokenInformation(size) FAILED err=%lu\n", GetLastError());
+        OutputDebugStringW(msg);
+        CloseHandle(hToken);
+        return FALSE;
+    }
+
+    TOKEN_MANDATORY_LABEL *pTIL =
+        (TOKEN_MANDATORY_LABEL*)HeapAlloc(GetProcessHeap(), 0, dwSize);
+    BOOL result = FALSE;
+
+    if (pTIL && GetTokenInformation(hToken, TokenIntegrityLevel, pTIL, dwSize, &dwSize))
+    {
+        DWORD level = *GetSidSubAuthority(
+            pTIL->Label.Sid,
+            (DWORD)(UCHAR)*GetSidSubAuthorityCount(pTIL->Label.Sid) - 1);
+        result = (level >= SECURITY_MANDATORY_HIGH_RID);
+
+        WCHAR msg[128];
+        wsprintfW(msg, L"[Obscurize] IsHighIntegrityClient: level=0x%lX (HIGH=0x3000) result=%d\n", level, (int)result);
+        OutputDebugStringW(msg);
+    }
+    else
+    {
+        WCHAR msg[128];
+        wsprintfW(msg, L"[Obscurize] IsHighIntegrityClient: GetTokenInformation(data) FAILED err=%lu\n", GetLastError());
+        OutputDebugStringW(msg);
+    }
+
+    if (pTIL) HeapFree(GetProcessHeap(), 0, pTIL);
+    CloseHandle(hToken);
+    return result;
+}
 
 // --------------------------------------------------------
 //  Server-side listener thread
@@ -61,9 +138,14 @@ static DWORD WINAPI ControlPipeListenerThread(LPVOID param)
             if (ReadFile(pipe, &controlCode, sizeof(DWORD), &bytesRead, NULL)
                 && bytesRead == sizeof(DWORD))
             {
-                // Dispatch – the callback may write a reply to the pipe
-                // (e.g. for OBS_CTRL_QUERY_STATUS) before returning.
-                callback(controlCode, pipe);
+                // Status query is allowed from any integrity level so the
+                // tray icon can display state without elevation.  All other
+                // commands (enable/disable, mode switch, inject, detach) are
+                // restricted to High integrity (elevated Administrator) callers.
+                if (controlCode == OBS_CTRL_QUERY_STATUS || IsHighIntegrityClient(pipe))
+                {
+                    callback(controlCode, pipe);
+                }
             }
         }
 
@@ -102,12 +184,16 @@ BOOL SendControlCode(DWORD controlCode, LPDWORD statusOut)
     // Wait up to 2 seconds for the pipe to be available.
     if (!WaitNamedPipeW(OBS_CONTROL_PIPE_NAME, 2000)) return FALSE;
 
+    // SECURITY_SQOS_PRESENT | SECURITY_IMPERSONATION is required so the
+    // server side can call ImpersonateNamedPipeClient to verify the
+    // caller's integrity level.  Without it the connection defaults to
+    // SecurityAnonymous and the integrity check always fails.
     HANDLE pipe = CreateFileW(
         OBS_CONTROL_PIPE_NAME,
         GENERIC_READ | GENERIC_WRITE,
         0, NULL,
         OPEN_EXISTING,
-        0, NULL);
+        SECURITY_SQOS_PRESENT | SECURITY_IMPERSONATION, NULL);
 
     if (pipe == INVALID_HANDLE_VALUE) return FALSE;
 
