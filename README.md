@@ -600,6 +600,7 @@ regardless of mode or configuration:
 |---|---|
 | `consent.exe` | UAC elevation broker — injection corrupts the elevation flow |
 | `winlogon.exe`, `lsass.exe`, `lsaiso.exe` | Core authentication infrastructure; PPL/Credential Guard protected |
+| `LockApp.exe`, `LogonUI.exe` | Lock screen and logon UI — resolution hooks cause the lock screen wallpaper to render at the spoofed resolution; no malware exposure in these processes |
 | `MsMpEng.exe`, `smartscreen.exe`, `SecurityHealthService.exe` | AV/EDR self-protection triggers on injection |
 | `explorer.exe`, shell experience hosts, `RuntimeBroker.exe`, `sihost.exe`, `taskhostw.exe` | NT-level registry hooks called at high frequency by the shell cause deadlocks and Explorer hangs |
 | `chrome.exe`, `msedge.exe`, `brave.exe`, `opera.exe`, `vivaldi.exe`, `firefox.exe`, `waterfox.exe` | Chromium-based browsers enable Code Integrity Guard (CIG), which blocks unsigned DLL injection and leaves the process in a broken state |
@@ -610,6 +611,7 @@ regardless of mode or configuration:
 | `EADesktop.exe`, `EABackgroundService.exe` | EA App — CEF-based launcher |
 | `UbisoftConnect.exe`, `upc.exe` | Ubisoft Connect — CEF-based launcher |
 | `Battle.net.exe`, `Battle.net Launcher.exe` | Battle.net — CEF-based launcher |
+| `vmware.exe`, `vmware-vmx.exe`, `vmware-authd.exe`, `vmware-hostd.exe`, `vmnetdhcp.exe`, `vmnetnat.exe`, `vmnat.exe`, `vmware-unity-helper.exe` | VMware Workstation uses named pipes for internal IPC (VMDB transport); injection breaks pipe communication and would cause VMware to spoof itself in Defensive mode |
 | `ObscurizeService.exe`, `ObscurizeGUI.exe` | Self-exclusion |
 
 ---

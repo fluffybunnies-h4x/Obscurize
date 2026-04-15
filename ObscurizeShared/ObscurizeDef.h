@@ -244,6 +244,11 @@
     L"winlogon.exe",             \
     L"lsass.exe",                \
     L"lsaiso.exe",               \
+    /* Lock screen and logon UI – resolution hooks corrupt    \
+       the lock screen display; these are security UI with   \
+       no malware exposure */                                 \
+    L"LockApp.exe",              \
+    L"LogonUI.exe",              \
     /* Windows Defender / AV – injecting triggers self-protection */ \
     L"MsMpEng.exe",              \
     L"smartscreen.exe",          \
@@ -258,6 +263,18 @@
     L"taskhostw.exe",            \
     /* Build tools */ \
     L"MSBuild.exe",              \
+    /* VMware Workstation – uses named pipes for internal IPC \
+       (VMDB transport); injection breaks pipe communication  \
+       and would cause VMware to spoof itself in Defensive    \
+       mode */                                                \
+    L"vmware.exe",               \
+    L"vmware-vmx.exe",           \
+    L"vmware-authd.exe",         \
+    L"vmware-hostd.exe",         \
+    L"vmnetdhcp.exe",            \
+    L"vmnetnat.exe",             \
+    L"vmnat.exe",                \
+    L"vmware-unity-helper.exe",  \
     /* Browsers – Chromium CIG blocks unsigned DLL injection, \
        leaving the process in a broken state on startup */    \
     L"chrome.exe",               \
