@@ -272,6 +272,24 @@
        first-run user login */                                \
     L"OneDriveSetup.exe",        \
     L"OneDrive.exe",             \
+    /* Steam – CEF-based overlay and web helper; injection    \
+       disrupts internal page rendering (blank overlay) */   \
+    L"steam.exe",                \
+    L"steamwebhelper.exe",       \
+    L"steamservice.exe",         \
+    /* Other CEF-based game launchers – same class of issue  \
+       as Steam; injecting into CEF renderers corrupts       \
+       internal page loading */                              \
+    L"EpicGamesLauncher.exe",    \
+    L"EpicWebHelper.exe",        \
+    L"GalaxyClient.exe",         \
+    L"GalaxyClientService.exe",  \
+    L"EADesktop.exe",            \
+    L"EABackgroundService.exe",  \
+    L"UbisoftConnect.exe",       \
+    L"upc.exe",                  \
+    L"Battle.net.exe",           \
+    L"Battle.net Launcher.exe",  \
     NULL }
 
 #endif  // _OBSCURIZE_DEF_H

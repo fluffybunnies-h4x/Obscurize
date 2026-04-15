@@ -604,6 +604,12 @@ regardless of mode or configuration:
 | `explorer.exe`, shell experience hosts, `RuntimeBroker.exe`, `sihost.exe`, `taskhostw.exe` | NT-level registry hooks called at high frequency by the shell cause deadlocks and Explorer hangs |
 | `chrome.exe`, `msedge.exe`, `brave.exe`, `opera.exe`, `vivaldi.exe`, `firefox.exe`, `waterfox.exe` | Chromium-based browsers enable Code Integrity Guard (CIG), which blocks unsigned DLL injection and leaves the process in a broken state |
 | `OneDriveSetup.exe`, `OneDrive.exe` | Protected DLL loading during first-run user setup; injection corrupts ordinal resolution causing an error dialog on new user login |
+| `steam.exe`, `steamwebhelper.exe`, `steamservice.exe` | Steam uses CEF (Chromium Embedded Framework) for its store overlay and browser; injection disrupts internal page rendering causing blank overlay pages |
+| `EpicGamesLauncher.exe`, `EpicWebHelper.exe` | Epic Games Launcher — CEF-based, same class of issue as Steam |
+| `GalaxyClient.exe`, `GalaxyClientService.exe` | GOG Galaxy — CEF-based launcher |
+| `EADesktop.exe`, `EABackgroundService.exe` | EA App — CEF-based launcher |
+| `UbisoftConnect.exe`, `upc.exe` | Ubisoft Connect — CEF-based launcher |
+| `Battle.net.exe`, `Battle.net Launcher.exe` | Battle.net — CEF-based launcher |
 | `ObscurizeService.exe`, `ObscurizeGUI.exe` | Self-exclusion |
 
 ---
