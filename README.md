@@ -611,7 +611,9 @@ regardless of mode or configuration:
 | `EADesktop.exe`, `EABackgroundService.exe` | EA App — CEF-based launcher |
 | `UbisoftConnect.exe`, `upc.exe` | Ubisoft Connect — CEF-based launcher |
 | `Battle.net.exe`, `Battle.net Launcher.exe` | Battle.net — CEF-based launcher |
-| `vmware.exe`, `vmware-vmx.exe`, `vmware-authd.exe`, `vmware-hostd.exe`, `vmnetdhcp.exe`, `vmnetnat.exe`, `vmnat.exe`, `vmware-unity-helper.exe` | VMware Workstation uses named pipes for internal IPC (VMDB transport); injection breaks pipe communication and would cause VMware to spoof itself in Defensive mode |
+| `vmware.exe`, `vmware-vmx.exe`, `vmware-authd.exe`, `vmware-hostd.exe`, `vmnetdhcp.exe`, `vmnetnat.exe`, `vmnat.exe`, `vmware-unity-helper.exe` | VMware Workstation host processes — named pipe IPC disruption and self-spoofing in Defensive mode |
+| `vmtoolsd.exe`, `VGAuthService.exe`, `vmacthlp.exe` | VMware Tools guest processes — coordinate with the hypervisor for VM snapshots via VSS quiesce; NT hooks running inside these processes during the VSS freeze window cause a BSOD |
+| `vssvc.exe`, `vss_ps.exe` | Windows Volume Shadow Copy Service — kernel-coordinated I/O freeze during snapshots and backups; NT hooks during the freeze window cause a BSOD |
 | `ObscurizeService.exe`, `ObscurizeGUI.exe` | Self-exclusion |
 
 ---

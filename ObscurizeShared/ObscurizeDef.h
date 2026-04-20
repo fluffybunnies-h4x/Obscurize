@@ -263,10 +263,10 @@
     L"taskhostw.exe",            \
     /* Build tools */ \
     L"MSBuild.exe",              \
-    /* VMware Workstation – uses named pipes for internal IPC \
-       (VMDB transport); injection breaks pipe communication  \
-       and would cause VMware to spoof itself in Defensive    \
-       mode */                                                \
+    /* VMware Workstation host – uses named pipes for internal  \
+       IPC (VMDB transport); injection breaks pipe            \
+       communication and would cause VMware to spoof itself   \
+       in Defensive mode */                                   \
     L"vmware.exe",               \
     L"vmware-vmx.exe",           \
     L"vmware-authd.exe",         \
@@ -275,6 +275,17 @@
     L"vmnetnat.exe",             \
     L"vmnat.exe",                \
     L"vmware-unity-helper.exe",  \
+    /* VMware Tools guest processes – coordinate with the     \
+       hypervisor for snapshots via VSS quiesce; NT hooks     \
+       inside these processes during VSS freeze cause BSOD */ \
+    L"vmtoolsd.exe",             \
+    L"VGAuthService.exe",        \
+    L"vmacthlp.exe",             \
+    /* VSS (Volume Shadow Copy) – kernel-coordinated freeze   \
+       during snapshots and backups; NT hooks during freeze   \
+       window cause BSOD */                                   \
+    L"vssvc.exe",                \
+    L"vss_ps.exe",               \
     /* Browsers – Chromium CIG blocks unsigned DLL injection, \
        leaving the process in a broken state on startup */    \
     L"chrome.exe",               \
