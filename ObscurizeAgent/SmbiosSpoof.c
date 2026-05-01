@@ -20,6 +20,7 @@
 //    Type 1  (System Information)
 //      Offset 4  Manufacturer string index
 //      Offset 5  Product Name string index
+//      Offset 7  Serial Number string index  (Win32_BIOS.SerialNumber)
 //
 //  String replacement strategy:
 //    Rather than patching in-place (which constrains string
@@ -41,11 +42,15 @@ static const char s_DefManufacturer[] = "VMware, Inc.";
 static const char s_DefProduct[]      = "VMware Virtual Platform";
 
 // Trap mode  →  VM looks like a real Dell workstation
-static const char s_TrapBiosVendor[]   = "Dell Inc.";
-static const char s_TrapBiosVersion[]  = "1.22.0";
-static const char s_TrapBiosDate[]     = "04/14/2023";
-static const char s_TrapManufacturer[] = "Dell Inc.";
-static const char s_TrapProduct[]      = "Precision 5560";
+static const char s_TrapBiosVendor[]      = "Dell Inc.";
+static const char s_TrapBiosVersion[]     = "1.22.0";
+static const char s_TrapBiosDate[]        = "04/14/2023";
+static const char s_TrapManufacturer[]    = "Dell Inc.";
+static const char s_TrapProduct[]         = "Precision 5560";
+static const char s_TrapSerialNumber[]    = "7X8K9P2";
+
+// Defensive mode serial (typical VMware VM value; matches PatchWmicOutput)
+static const char s_DefSerialNumber[]     = "None";
 
 // Maximum strings tracked per SMBIOS structure.
 // The SMBIOS spec allows up to 255 strings per structure;
@@ -159,11 +164,12 @@ LPBYTE PatchRSMBBuffer(LPCBYTE original, DWORD originalSize, LPDWORD pOutPatched
     // Select spoof strings for the current mode.
     DWORD mode = ObsGetMode();
 
-    const char *spoofBiosVendor   = (mode == OBS_MODE_TRAP) ? s_TrapBiosVendor   : s_DefBiosVendor;
-    const char *spoofBiosVersion  = (mode == OBS_MODE_TRAP) ? s_TrapBiosVersion  : s_DefBiosVersion;
-    const char *spoofBiosDate     = (mode == OBS_MODE_TRAP) ? s_TrapBiosDate     : s_DefBiosDate;
-    const char *spoofManufacturer = (mode == OBS_MODE_TRAP) ? s_TrapManufacturer : s_DefManufacturer;
-    const char *spoofProduct      = (mode == OBS_MODE_TRAP) ? s_TrapProduct      : s_DefProduct;
+    const char *spoofBiosVendor    = (mode == OBS_MODE_TRAP) ? s_TrapBiosVendor    : s_DefBiosVendor;
+    const char *spoofBiosVersion   = (mode == OBS_MODE_TRAP) ? s_TrapBiosVersion   : s_DefBiosVersion;
+    const char *spoofBiosDate      = (mode == OBS_MODE_TRAP) ? s_TrapBiosDate      : s_DefBiosDate;
+    const char *spoofManufacturer  = (mode == OBS_MODE_TRAP) ? s_TrapManufacturer  : s_DefManufacturer;
+    const char *spoofProduct       = (mode == OBS_MODE_TRAP) ? s_TrapProduct       : s_DefProduct;
+    const char *spoofSerialNumber  = (mode == OBS_MODE_TRAP) ? s_TrapSerialNumber  : s_DefSerialNumber;
 
     // Allocate output buffer: original size + headroom for string growth.
     DWORD  outBufCap = originalSize + OBS_SMBIOS_HEADROOM;
@@ -230,13 +236,16 @@ LPBYTE PatchRSMBBuffer(LPCBYTE original, DWORD originalSize, LPDWORD pOutPatched
         // ── Type 1: System Information ───────────────────────
         // Offset 4  Manufacturer string index  (1-based)
         // Offset 5  Product Name string index
-        else if (structType == 1 && structLen >= 6)
+        // Offset 7  Serial Number string index  ← Win32_BIOS.SerialNumber
+        else if (structType == 1 && structLen >= 8)
         {
             BYTE mi = inPtr[4];   // Manufacturer
             BYTE pi = inPtr[5];   // Product Name
+            BYTE si = inPtr[7];   // Serial Number
 
             if (mi > 0 && mi <= strCount) replaceMap[mi - 1] = spoofManufacturer;
             if (pi > 0 && pi <= strCount) replaceMap[pi - 1] = spoofProduct;
+            if (si > 0 && si <= strCount) replaceMap[si - 1] = spoofSerialNumber;
         }
 
         // Guard: ensure we won't overrun the output buffer.

@@ -141,7 +141,7 @@ static BOOL (WINAPI *OriginalCreateProcessA)(LPCSTR, LPSTR,
     LPSECURITY_ATTRIBUTES, LPSECURITY_ATTRIBUTES, BOOL, DWORD,
     LPVOID, LPCSTR, LPSTARTUPINFOA, LPPROCESS_INFORMATION)           = NULL;
 
-// kernelbase – systeminfo.exe stdout patching (only installed in systeminfo.exe)
+// kernelbase – stdout patching for systeminfo.exe and wmic.exe
 // Resolved from kernelbase.dll (actual implementation) not kernel32 forwarding stubs,
 // and WriteConsoleW added to handle ConPTY / Windows Terminal paths.
 static BOOL (WINAPI *OriginalWriteFile)(
@@ -151,9 +151,15 @@ static BOOL (WINAPI *OriginalWriteConsoleA)(
 static BOOL (WINAPI *OriginalWriteConsoleW)(
     HANDLE, const VOID *, DWORD, LPDWORD, LPVOID)                    = NULL;
 
-// Set once at InitializeHooks time – TRUE only when injected into systeminfo.exe
+// Set once at InitializeHooks time – TRUE only when injected into systeminfo.exe / wmic.exe
 static BOOL   g_IsSystemInfo  = FALSE;
+static BOOL   g_IsWmic        = FALSE;
 static HANDLE g_StdoutHandle  = INVALID_HANDLE_VALUE;
+
+// Stateful serial-number replacement for wmic.exe output.
+// 0 = scanning for SerialNumber header line
+// 1 = next non-empty/non-whitespace line is the value to replace
+static volatile int g_WmicSerialState = 0;
 
 // TLS slots for NtEnumerateKey O(N) cache (same pattern as r77)
 static DWORD TlsEnumKeyCacheKey;
@@ -845,12 +851,75 @@ static UINT WINAPI HookedGetSystemFirmwareTable(
 }
 
 // ------------------------------------------------------------
+//  RequestImmediateInjection
+//  Connect to the Obscurize service pipe and ask it to inject
+//  the agent into `pid` synchronously.  Called while the target
+//  process is still suspended; returns after the service has
+//  confirmed injection so the caller can safely ResumeThread.
+// ------------------------------------------------------------
+static BOOL RequestImmediateInjection(DWORD pid)
+{
+    // Wait up to 1 s for the pipe to be available.
+    if (!WaitNamedPipeW(OBS_CONTROL_PIPE_NAME, 1000))
+    {
+        WCHAR dbg[128];
+        wsprintfW(dbg, L"[Obs] INJECT_PID: WaitNamedPipe FAILED pid=%lu err=%lu\n", pid, GetLastError());
+        OutputDebugStringW(dbg);
+        return FALSE;
+    }
+
+    HANDLE pipe = CreateFileW(
+        OBS_CONTROL_PIPE_NAME,
+        GENERIC_READ | GENERIC_WRITE,
+        0, NULL,
+        OPEN_EXISTING,
+        SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, NULL);
+    if (pipe == INVALID_HANDLE_VALUE)
+    {
+        WCHAR dbg[128];
+        wsprintfW(dbg, L"[Obs] INJECT_PID: CreateFile FAILED pid=%lu err=%lu\n", pid, GetLastError());
+        OutputDebugStringW(dbg);
+        return FALSE;
+    }
+
+    DWORD pipeMode = PIPE_READMODE_MESSAGE;
+    SetNamedPipeHandleState(pipe, &pipeMode, NULL, NULL);
+
+    BOOL  ok      = FALSE;
+    DWORD written = 0;
+    DWORD code    = OBS_CTRL_INJECT_PID;
+
+    if (WriteFile(pipe, &code, sizeof(DWORD), &written, NULL) && written == sizeof(DWORD))
+    {
+        if (WriteFile(pipe, &pid, sizeof(DWORD), &written, NULL) && written == sizeof(DWORD))
+        {
+            DWORD reply = 0, bytesRead = 0;
+            if (ReadFile(pipe, &reply, sizeof(DWORD), &bytesRead, NULL)
+                && bytesRead == sizeof(DWORD))
+            {
+                ok = (reply == OBS_STATUS_OK);
+            }
+        }
+    }
+
+    WCHAR dbg[128];
+    wsprintfW(dbg, L"[Obs] INJECT_PID: pid=%lu result=%d\n", pid, (int)ok);
+    OutputDebugStringW(dbg);
+
+    CloseHandle(pipe);
+    return ok;
+}
+
+// ------------------------------------------------------------
 //  CreateProcessW / CreateProcessA
-//  Strip -NoProfile (and any case-insensitive prefix abbreviation
-//  of "noprofile" with at least 3 body chars: -nop, -nopr, …,
-//  -noprofile) from PowerShell command lines so the system-wide
-//  profile.ps1 is always loaded, even when the spawning process
-//  passes -NoProfile explicitly.
+//  Two responsibilities:
+//    1. Strip -NoProfile (and prefix abbreviations >= 3 body
+//       chars) from PowerShell command lines so the system-wide
+//       profile.ps1 is always loaded.
+//    2. Create wmic.exe suspended, signal the service to inject
+//       the agent synchronously, then resume – eliminating the
+//       100 ms polling race that lets wmic finish before the
+//       agent is installed.
 // ------------------------------------------------------------
 
 // Strip -noprofile / /noprofile (and prefix abbreviations >= 3 body chars)
@@ -928,40 +997,103 @@ static BOOL WINAPI HookedCreateProcessW(
 {
     LPWSTR modifiedCmd = NULL;
     LPWSTR cmdToUse    = lpCommandLine;
+    BOOL   injectWmic  = FALSE;
     BOOL   result;
 
-    if (ObsIsEnabled() && lpCommandLine)
+    if (ObsIsEnabled())
     {
-        BOOL isPs = (StrStrIW(lpCommandLine, L"powershell") != NULL ||
-                     StrStrIW(lpCommandLine, L"pwsh")       != NULL);
-        if (!isPs && lpApplicationName)
-            isPs = (StrStrIW(lpApplicationName, L"powershell") != NULL ||
-                    StrStrIW(lpApplicationName, L"pwsh")       != NULL);
-
-        if (isPs)
+        // PowerShell: strip -NoProfile so system-wide profile.ps1 always loads.
+        if (lpCommandLine)
         {
-            SIZE_T cch = wcslen(lpCommandLine) + 1;
-            modifiedCmd = (LPWSTR)HeapAlloc(GetProcessHeap(), 0, cch * sizeof(WCHAR));
-            if (modifiedCmd)
+            BOOL isPs = (StrStrIW(lpCommandLine, L"powershell") != NULL ||
+                         StrStrIW(lpCommandLine, L"pwsh")       != NULL);
+            if (!isPs && lpApplicationName)
+                isPs = (StrStrIW(lpApplicationName, L"powershell") != NULL ||
+                        StrStrIW(lpApplicationName, L"pwsh")       != NULL);
+
+            if (isPs)
             {
-                CopyMemory(modifiedCmd, lpCommandLine, cch * sizeof(WCHAR));
-                if (StripNoProfFlag(modifiedCmd))
-                    cmdToUse = modifiedCmd;
-                else
+                SIZE_T cch = wcslen(lpCommandLine) + 1;
+                modifiedCmd = (LPWSTR)HeapAlloc(GetProcessHeap(), 0, cch * sizeof(WCHAR));
+                if (modifiedCmd)
                 {
-                    HeapFree(GetProcessHeap(), 0, modifiedCmd);
-                    modifiedCmd = NULL;
+                    CopyMemory(modifiedCmd, lpCommandLine, cch * sizeof(WCHAR));
+                    if (StripNoProfFlag(modifiedCmd))
+                        cmdToUse = modifiedCmd;
+                    else
+                    {
+                        HeapFree(GetProcessHeap(), 0, modifiedCmd);
+                        modifiedCmd = NULL;
+                    }
                 }
             }
         }
+
+        // wmic.exe: detect by name so we can pre-inject before it runs.
+        BOOL isWmic = (lpApplicationName && StrStrIW(lpApplicationName, L"wmic.exe") != NULL) ||
+                      (lpCommandLine     && StrStrIW(lpCommandLine,     L"wmic.exe") != NULL);
+        if (!isWmic && lpCommandLine)
+        {
+            // Bare "wmic" without .exe extension (word-boundary check).
+            LPCWSTR pos = StrStrIW(lpCommandLine, L"wmic");
+            if (pos)
+            {
+                WCHAR after = *(pos + 4);
+                isWmic = (after == L'\0' || after == L' ' || after == L'\t' || after == L'"');
+            }
+        }
+
+        injectWmic = isWmic;
     }
+
+    // Unconditional trace – fires regardless of enabled state so we can confirm
+    // the hook is reaching cmd.exe and see the raw app/cmd strings it passes.
+    {
+        WCHAR dbg[256];
+        WCHAR appShort[64] = L"(null)";
+        WCHAR cmdShort[64] = L"(null)";
+        if (lpApplicationName)
+        {
+            StringCchCopyW(appShort, 64, lpApplicationName);
+            appShort[63] = L'\0';
+        }
+        if (lpCommandLine)
+        {
+            StringCchCopyW(cmdShort, 64, lpCommandLine);
+            cmdShort[63] = L'\0';
+        }
+        wsprintfW(dbg, L"[Obs] CreateProcessW enabled=%d app=\"%.63s\" cmd=\"%.63s\" wmic=%d\n",
+                  (int)ObsIsEnabled(), appShort, cmdShort, (int)injectWmic);
+        OutputDebugStringW(dbg);
+    }
+
+    // Create wmic.exe suspended so the agent is installed before it queries WMI.
+    BOOL                  wasAlreadySuspended = (dwCreationFlags & CREATE_SUSPENDED) != 0;
+    DWORD                 flagsToUse          = dwCreationFlags;
+    PROCESS_INFORMATION   localPi             = { 0 };
+    LPPROCESS_INFORMATION piToUse             = lpProcessInformation ? lpProcessInformation : &localPi;
+
+    if (injectWmic)
+        flagsToUse |= CREATE_SUSPENDED;
 
     result = OriginalCreateProcessW(
         lpApplicationName, cmdToUse,
         lpProcessAttributes, lpThreadAttributes,
-        bInheritHandles, dwCreationFlags,
+        bInheritHandles, flagsToUse,
         lpEnvironment, lpCurrentDirectory,
-        lpStartupInfo, lpProcessInformation);
+        lpStartupInfo, piToUse);
+
+    if (result && injectWmic)
+    {
+        RequestImmediateInjection(piToUse->dwProcessId);
+        if (!wasAlreadySuspended)
+            ResumeThread(piToUse->hThread);
+        if (!lpProcessInformation)
+        {
+            CloseHandle(piToUse->hProcess);
+            CloseHandle(piToUse->hThread);
+        }
+    }
 
     if (modifiedCmd)
         HeapFree(GetProcessHeap(), 0, modifiedCmd);
@@ -983,48 +1115,87 @@ static BOOL WINAPI HookedCreateProcessA(
 {
     LPSTR modifiedCmd = NULL;
     LPSTR cmdToUse    = lpCommandLine;
+    BOOL  injectWmic  = FALSE;
     BOOL  result;
 
-    if (ObsIsEnabled() && lpCommandLine)
+    if (ObsIsEnabled())
     {
-        BOOL isPs = (StrStrIA(lpCommandLine, "powershell") != NULL ||
-                     StrStrIA(lpCommandLine, "pwsh")       != NULL);
-        if (!isPs && lpApplicationName)
-            isPs = (StrStrIA(lpApplicationName, "powershell") != NULL ||
-                    StrStrIA(lpApplicationName, "pwsh")       != NULL);
-
-        if (isPs)
+        // PowerShell: strip -NoProfile.
+        if (lpCommandLine)
         {
-            // Convert to wide for uniform StripNoProfFlag processing.
-            int    wCch    = MultiByteToWideChar(CP_ACP, 0, lpCommandLine, -1, NULL, 0);
-            LPWSTR wideCmd = (LPWSTR)HeapAlloc(GetProcessHeap(), 0,
-                                               (SIZE_T)wCch * sizeof(WCHAR));
-            if (wideCmd)
+            BOOL isPs = (StrStrIA(lpCommandLine, "powershell") != NULL ||
+                         StrStrIA(lpCommandLine, "pwsh")       != NULL);
+            if (!isPs && lpApplicationName)
+                isPs = (StrStrIA(lpApplicationName, "powershell") != NULL ||
+                        StrStrIA(lpApplicationName, "pwsh")       != NULL);
+
+            if (isPs)
             {
-                MultiByteToWideChar(CP_ACP, 0, lpCommandLine, -1, wideCmd, wCch);
-                if (StripNoProfFlag(wideCmd))
+                // Convert to wide for uniform StripNoProfFlag processing.
+                int    wCch    = MultiByteToWideChar(CP_ACP, 0, lpCommandLine, -1, NULL, 0);
+                LPWSTR wideCmd = (LPWSTR)HeapAlloc(GetProcessHeap(), 0,
+                                                   (SIZE_T)wCch * sizeof(WCHAR));
+                if (wideCmd)
                 {
-                    int   mbLen = WideCharToMultiByte(CP_ACP, 0, wideCmd, -1,
-                                                     NULL, 0, NULL, NULL);
-                    modifiedCmd = (LPSTR)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)mbLen);
-                    if (modifiedCmd)
+                    MultiByteToWideChar(CP_ACP, 0, lpCommandLine, -1, wideCmd, wCch);
+                    if (StripNoProfFlag(wideCmd))
                     {
-                        WideCharToMultiByte(CP_ACP, 0, wideCmd, -1,
-                                           modifiedCmd, mbLen, NULL, NULL);
-                        cmdToUse = modifiedCmd;
+                        int   mbLen = WideCharToMultiByte(CP_ACP, 0, wideCmd, -1,
+                                                         NULL, 0, NULL, NULL);
+                        modifiedCmd = (LPSTR)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)mbLen);
+                        if (modifiedCmd)
+                        {
+                            WideCharToMultiByte(CP_ACP, 0, wideCmd, -1,
+                                               modifiedCmd, mbLen, NULL, NULL);
+                            cmdToUse = modifiedCmd;
+                        }
                     }
+                    HeapFree(GetProcessHeap(), 0, wideCmd);
                 }
-                HeapFree(GetProcessHeap(), 0, wideCmd);
             }
         }
+
+        // wmic.exe: detect for pre-injection.
+        BOOL isWmic = (lpApplicationName && StrStrIA(lpApplicationName, "wmic.exe") != NULL) ||
+                      (lpCommandLine     && StrStrIA(lpCommandLine,     "wmic.exe") != NULL);
+        if (!isWmic && lpCommandLine)
+        {
+            LPCSTR pos = StrStrIA(lpCommandLine, "wmic");
+            if (pos)
+            {
+                char after = *(pos + 4);
+                isWmic = (after == '\0' || after == ' ' || after == '\t' || after == '"');
+            }
+        }
+        injectWmic = isWmic;
     }
+
+    BOOL                  wasAlreadySuspended = (dwCreationFlags & CREATE_SUSPENDED) != 0;
+    DWORD                 flagsToUse          = dwCreationFlags;
+    PROCESS_INFORMATION   localPi             = { 0 };
+    LPPROCESS_INFORMATION piToUse             = lpProcessInformation ? lpProcessInformation : &localPi;
+
+    if (injectWmic)
+        flagsToUse |= CREATE_SUSPENDED;
 
     result = OriginalCreateProcessA(
         lpApplicationName, cmdToUse,
         lpProcessAttributes, lpThreadAttributes,
-        bInheritHandles, dwCreationFlags,
+        bInheritHandles, flagsToUse,
         lpEnvironment, lpCurrentDirectory,
-        lpStartupInfo, lpProcessInformation);
+        lpStartupInfo, piToUse);
+
+    if (result && injectWmic)
+    {
+        RequestImmediateInjection(piToUse->dwProcessId);
+        if (!wasAlreadySuspended)
+            ResumeThread(piToUse->hThread);
+        if (!lpProcessInformation)
+        {
+            CloseHandle(piToUse->hProcess);
+            CloseHandle(piToUse->hThread);
+        }
+    }
 
     if (modifiedCmd)
         HeapFree(GetProcessHeap(), 0, modifiedCmd);
@@ -1128,6 +1299,163 @@ static LPBYTE PatchSysInfoOutput(LPCBYTE src, DWORD srcLen, DWORD *outLen)
     return dst;
 }
 
+// ------------------------------------------------------------
+//  wmic.exe stdout patching  (g_IsWmic)
+//  Covers both modes – Defensive reports "None" (typical VMware
+//  BIOS serial), Trap reports a realistic Dell service tag.
+//
+//  Uses a stateful two-phase parser so the header line and the
+//  value line can arrive in separate Write calls:
+//    State 0: scan for "SerialNumber" column header
+//    State 1: next non-empty line is the value; replace it
+//
+//  The state variable (g_WmicSerialState) lives for the lifetime
+//  of the wmic.exe process, which terminates after one query.
+// ------------------------------------------------------------
+
+static LPBYTE PatchWmicOutput(LPCBYTE src, DWORD srcLen, DWORD *outLen)
+{
+    static const char kHeader[]      = "SerialNumber";
+    static const DWORD kHeaderLen    = (DWORD)(sizeof(kHeader) - 1);
+    static const char kSerialDef[]   = "None";
+    static const char kSerialTrap[]  = "7X8K9P2";
+
+    const char *spoofSerial    = (ObsGetMode() == OBS_MODE_DEFENSIVE)
+                                 ? kSerialDef : kSerialTrap;
+    DWORD       spoofSerialLen = (DWORD)strlen(spoofSerial);
+
+    DWORD  cap = srcLen + spoofSerialLen + 16;
+    LPBYTE dst = (LPBYTE)HeapAlloc(GetProcessHeap(), 0, cap);
+    if (!dst) return NULL;
+
+    BOOL  changed = FALSE;
+    DWORD ri = 0, wi = 0;
+
+    while (ri < srcLen && wi < cap)
+    {
+        if (g_WmicSerialState == 0)
+        {
+            DWORD rem = srcLen - ri;
+
+            if (rem >= kHeaderLen &&
+                _strnicmp((const char *)(src + ri), kHeader, kHeaderLen) == 0)
+            {
+                // Copy "SerialNumber" header
+                CopyMemory(dst + wi, src + ri, kHeaderLen);
+                wi += kHeaderLen;
+                ri += kHeaderLen;
+                // Copy rest of header line
+                while (ri < srcLen && src[ri] != '\n')
+                    dst[wi++] = src[ri++];
+                if (ri < srcLen)
+                    dst[wi++] = src[ri++];  // '\n'
+                g_WmicSerialState = 1;
+                continue;
+            }
+
+            dst[wi++] = src[ri++];
+        }
+        else  // state == 1
+        {
+            // Skip blank lines and leading whitespace before the value
+            if (src[ri] == '\r' || src[ri] == '\n' || src[ri] == ' ' || src[ri] == '\t')
+            {
+                dst[wi++] = src[ri++];
+                continue;
+            }
+
+            // This is the serial number value; write the spoofed one
+            CopyMemory(dst + wi, spoofSerial, spoofSerialLen);
+            wi += spoofSerialLen;
+            // Skip the original serial value
+            while (ri < srcLen && src[ri] != '\r' && src[ri] != '\n')
+                ri++;
+            g_WmicSerialState = 0;
+            changed = TRUE;
+        }
+    }
+
+    if (!changed)
+    {
+        HeapFree(GetProcessHeap(), 0, dst);
+        return NULL;
+    }
+
+    *outLen = wi;
+    return dst;
+}
+
+static LPWSTR PatchWmicOutputW(LPCWSTR src, DWORD srcCch, DWORD *outCch)
+{
+    static const WCHAR kHeader[]     = L"SerialNumber";
+    static const DWORD kHeaderLen    = (DWORD)(ARRAYSIZE(kHeader) - 1);
+    static const WCHAR kSerialDef[]  = L"None";
+    static const WCHAR kSerialTrap[] = L"7X8K9P2";
+
+    const WCHAR *spoofSerial    = (ObsGetMode() == OBS_MODE_DEFENSIVE)
+                                  ? kSerialDef : kSerialTrap;
+    DWORD        spoofSerialLen = (DWORD)(
+        (ObsGetMode() == OBS_MODE_DEFENSIVE)
+            ? ARRAYSIZE(kSerialDef)  - 1
+            : ARRAYSIZE(kSerialTrap) - 1);
+
+    DWORD  cap = srcCch + spoofSerialLen + 16;
+    LPWSTR dst = (LPWSTR)HeapAlloc(GetProcessHeap(), 0, cap * sizeof(WCHAR));
+    if (!dst) return NULL;
+
+    BOOL  changed = FALSE;
+    DWORD ri = 0, wi = 0;
+
+    while (ri < srcCch && wi < cap)
+    {
+        if (g_WmicSerialState == 0)
+        {
+            DWORD rem = srcCch - ri;
+
+            if (rem >= kHeaderLen &&
+                _wcsnicmp(src + ri, kHeader, kHeaderLen) == 0)
+            {
+                CopyMemory(dst + wi, src + ri, kHeaderLen * sizeof(WCHAR));
+                wi += kHeaderLen;
+                ri += kHeaderLen;
+                while (ri < srcCch && src[ri] != L'\n')
+                    dst[wi++] = src[ri++];
+                if (ri < srcCch)
+                    dst[wi++] = src[ri++];  // L'\n'
+                g_WmicSerialState = 1;
+                continue;
+            }
+
+            dst[wi++] = src[ri++];
+        }
+        else  // state == 1
+        {
+            if (src[ri] == L'\r' || src[ri] == L'\n' ||
+                src[ri] == L' '  || src[ri] == L'\t')
+            {
+                dst[wi++] = src[ri++];
+                continue;
+            }
+
+            CopyMemory(dst + wi, spoofSerial, spoofSerialLen * sizeof(WCHAR));
+            wi += spoofSerialLen;
+            while (ri < srcCch && src[ri] != L'\r' && src[ri] != L'\n')
+                ri++;
+            g_WmicSerialState = 0;
+            changed = TRUE;
+        }
+    }
+
+    if (!changed)
+    {
+        HeapFree(GetProcessHeap(), 0, dst);
+        return NULL;
+    }
+
+    *outCch = wi;
+    return dst;
+}
+
 static BOOL WINAPI HookedWriteFile(
     HANDLE       hFile,
     LPCVOID      lpBuffer,
@@ -1135,18 +1463,53 @@ static BOOL WINAPI HookedWriteFile(
     LPDWORD      lpNumberOfBytesWritten,
     LPOVERLAPPED lpOverlapped)
 {
-    if (g_IsSystemInfo && ObsIsEnabled() && ObsGetMode() == OBS_MODE_TRAP &&
-        hFile == g_StdoutHandle && lpBuffer && nNumberOfBytesToWrite > 0)
+    if (ObsIsEnabled() && hFile == g_StdoutHandle &&
+        lpBuffer && nNumberOfBytesToWrite > 0)
     {
-        DWORD  pLen = 0;
-        LPBYTE p    = PatchSysInfoOutput((LPCBYTE)lpBuffer, nNumberOfBytesToWrite, &pLen);
-        if (p)
+        if (g_IsSystemInfo && ObsGetMode() == OBS_MODE_TRAP)
         {
-            BOOL r = OriginalWriteFile(hFile, p, pLen, lpNumberOfBytesWritten, lpOverlapped);
-            HeapFree(GetProcessHeap(), 0, p);
-            // Report original byte count so the caller never sees a short write
-            if (lpNumberOfBytesWritten) *lpNumberOfBytesWritten = nNumberOfBytesToWrite;
-            return r;
+            DWORD  pLen = 0;
+            LPBYTE p    = PatchSysInfoOutput((LPCBYTE)lpBuffer, nNumberOfBytesToWrite, &pLen);
+            if (p)
+            {
+                BOOL r = OriginalWriteFile(hFile, p, pLen, lpNumberOfBytesWritten, lpOverlapped);
+                HeapFree(GetProcessHeap(), 0, p);
+                if (lpNumberOfBytesWritten) *lpNumberOfBytesWritten = nNumberOfBytesToWrite;
+                return r;
+            }
+        }
+        else if (g_IsWmic)
+        {
+            // wmic writes UTF-16 LE to pipes/files; detect by checking if every
+            // second byte is 0x00 (valid for ASCII-range content).
+            BOOL wideOut = (nNumberOfBytesToWrite >= 4 &&
+                            ((LPCBYTE)lpBuffer)[1] == 0x00);
+            if (wideOut)
+            {
+                DWORD  pCch = 0;
+                LPWSTR p    = PatchWmicOutputW((LPCWSTR)lpBuffer,
+                                               nNumberOfBytesToWrite / sizeof(WCHAR), &pCch);
+                if (p)
+                {
+                    BOOL r = OriginalWriteFile(hFile, p, pCch * sizeof(WCHAR),
+                                               lpNumberOfBytesWritten, lpOverlapped);
+                    HeapFree(GetProcessHeap(), 0, p);
+                    if (lpNumberOfBytesWritten) *lpNumberOfBytesWritten = nNumberOfBytesToWrite;
+                    return r;
+                }
+            }
+            else
+            {
+                DWORD  pLen = 0;
+                LPBYTE p    = PatchWmicOutput((LPCBYTE)lpBuffer, nNumberOfBytesToWrite, &pLen);
+                if (p)
+                {
+                    BOOL r = OriginalWriteFile(hFile, p, pLen, lpNumberOfBytesWritten, lpOverlapped);
+                    HeapFree(GetProcessHeap(), 0, p);
+                    if (lpNumberOfBytesWritten) *lpNumberOfBytesWritten = nNumberOfBytesToWrite;
+                    return r;
+                }
+            }
         }
     }
     return OriginalWriteFile(hFile, lpBuffer, nNumberOfBytesToWrite,
@@ -1160,18 +1523,34 @@ static BOOL WINAPI HookedWriteConsoleA(
     LPDWORD     lpNumberOfCharsWritten,
     LPVOID      lpReserved)
 {
-    if (g_IsSystemInfo && ObsIsEnabled() && ObsGetMode() == OBS_MODE_TRAP &&
-        hConsoleOutput == g_StdoutHandle && lpBuffer && nNumberOfCharsToWrite > 0)
+    if (ObsIsEnabled() && hConsoleOutput == g_StdoutHandle &&
+        lpBuffer && nNumberOfCharsToWrite > 0)
     {
-        DWORD  pLen = 0;
-        LPBYTE p    = PatchSysInfoOutput((LPCBYTE)lpBuffer, nNumberOfCharsToWrite, &pLen);
-        if (p)
+        if (g_IsSystemInfo && ObsGetMode() == OBS_MODE_TRAP)
         {
-            BOOL r = OriginalWriteConsoleA(hConsoleOutput, p, pLen,
-                                           lpNumberOfCharsWritten, lpReserved);
-            HeapFree(GetProcessHeap(), 0, p);
-            if (lpNumberOfCharsWritten) *lpNumberOfCharsWritten = nNumberOfCharsToWrite;
-            return r;
+            DWORD  pLen = 0;
+            LPBYTE p    = PatchSysInfoOutput((LPCBYTE)lpBuffer, nNumberOfCharsToWrite, &pLen);
+            if (p)
+            {
+                BOOL r = OriginalWriteConsoleA(hConsoleOutput, p, pLen,
+                                               lpNumberOfCharsWritten, lpReserved);
+                HeapFree(GetProcessHeap(), 0, p);
+                if (lpNumberOfCharsWritten) *lpNumberOfCharsWritten = nNumberOfCharsToWrite;
+                return r;
+            }
+        }
+        else if (g_IsWmic)
+        {
+            DWORD  pLen = 0;
+            LPBYTE p    = PatchWmicOutput((LPCBYTE)lpBuffer, nNumberOfCharsToWrite, &pLen);
+            if (p)
+            {
+                BOOL r = OriginalWriteConsoleA(hConsoleOutput, p, pLen,
+                                               lpNumberOfCharsWritten, lpReserved);
+                HeapFree(GetProcessHeap(), 0, p);
+                if (lpNumberOfCharsWritten) *lpNumberOfCharsWritten = nNumberOfCharsToWrite;
+                return r;
+            }
         }
     }
     return OriginalWriteConsoleA(hConsoleOutput, lpBuffer, nNumberOfCharsToWrite,
@@ -1270,18 +1649,34 @@ static BOOL WINAPI HookedWriteConsoleW(
     LPDWORD     lpNumberOfCharsWritten,
     LPVOID      lpReserved)
 {
-    if (g_IsSystemInfo && ObsIsEnabled() && ObsGetMode() == OBS_MODE_TRAP &&
-        hConsoleOutput == g_StdoutHandle && lpBuffer && nNumberOfCharsToWrite > 0)
+    if (ObsIsEnabled() && hConsoleOutput == g_StdoutHandle &&
+        lpBuffer && nNumberOfCharsToWrite > 0)
     {
-        DWORD  pCch = 0;
-        LPWSTR p    = PatchSysInfoOutputW((LPCWSTR)lpBuffer, nNumberOfCharsToWrite, &pCch);
-        if (p)
+        if (g_IsSystemInfo && ObsGetMode() == OBS_MODE_TRAP)
         {
-            BOOL r = OriginalWriteConsoleW(hConsoleOutput, p, pCch,
-                                           lpNumberOfCharsWritten, lpReserved);
-            HeapFree(GetProcessHeap(), 0, p);
-            if (lpNumberOfCharsWritten) *lpNumberOfCharsWritten = nNumberOfCharsToWrite;
-            return r;
+            DWORD  pCch = 0;
+            LPWSTR p    = PatchSysInfoOutputW((LPCWSTR)lpBuffer, nNumberOfCharsToWrite, &pCch);
+            if (p)
+            {
+                BOOL r = OriginalWriteConsoleW(hConsoleOutput, p, pCch,
+                                               lpNumberOfCharsWritten, lpReserved);
+                HeapFree(GetProcessHeap(), 0, p);
+                if (lpNumberOfCharsWritten) *lpNumberOfCharsWritten = nNumberOfCharsToWrite;
+                return r;
+            }
+        }
+        else if (g_IsWmic)
+        {
+            DWORD  pCch = 0;
+            LPWSTR p    = PatchWmicOutputW((LPCWSTR)lpBuffer, nNumberOfCharsToWrite, &pCch);
+            if (p)
+            {
+                BOOL r = OriginalWriteConsoleW(hConsoleOutput, p, pCch,
+                                               lpNumberOfCharsWritten, lpReserved);
+                HeapFree(GetProcessHeap(), 0, p);
+                if (lpNumberOfCharsWritten) *lpNumberOfCharsWritten = nNumberOfCharsToWrite;
+                return r;
+            }
         }
     }
     return OriginalWriteConsoleW(hConsoleOutput, lpBuffer, nNumberOfCharsToWrite,
@@ -1368,20 +1763,19 @@ VOID InitializeHooks(VOID)
     TlsEnumKeyCacheI              = TlsAlloc();
     TlsEnumKeyCacheCorrectedIndex = TlsAlloc();
 
-    // Detect systeminfo.exe – only install WriteFile/WriteConsoleA hooks there
+    // Detect systeminfo.exe and wmic.exe – only install stdout hooks there
     {
         CHAR path[MAX_PATH] = { 0 };
         GetModuleFileNameA(NULL, path, MAX_PATH);
         CHAR *last = strrchr(path, '\\');
         g_IsSystemInfo = (last != NULL && _stricmp(last + 1, "systeminfo.exe") == 0);
-        if (g_IsSystemInfo)
+        g_IsWmic       = (last != NULL && _stricmp(last + 1, "wmic.exe")       == 0);
+        if (g_IsSystemInfo || g_IsWmic)
         {
             // Resolve from kernelbase.dll (actual implementation), not kernel32 forwarding
-            // stubs.  Modern executables (including systeminfo.exe) import WriteFile and
-            // WriteConsoleA/W directly from kernelbase via the ApiSet, so hooking the
-            // kernel32 stub would leave their IAT slot un-patched.
-            // WriteConsoleW is added to cover the ConPTY / Windows Terminal path where
-            // systeminfo's UCRT detects a console handle and calls WriteConsoleW (wide).
+            // stubs.  Modern executables import WriteFile and WriteConsoleA/W directly from
+            // kernelbase via the ApiSet, so hooking the kernel32 stub leaves the IAT un-patched.
+            // WriteConsoleW covers the ConPTY / Windows Terminal path (wide console output).
             g_StdoutHandle        = GetStdHandle(STD_OUTPUT_HANDLE);
             OriginalWriteFile     = (BOOL(WINAPI*)(HANDLE,LPCVOID,DWORD,LPDWORD,LPOVERLAPPED)) ResolveFunction("kernelbase.dll", "WriteFile");
             OriginalWriteConsoleA = (BOOL(WINAPI*)(HANDLE,const VOID*,DWORD,LPDWORD,LPVOID))   ResolveFunction("kernelbase.dll", "WriteConsoleA");
@@ -1434,7 +1828,7 @@ VOID InitializeHooks(VOID)
     if (OriginalCreateProcessW)           DetourAttach(&(PVOID)OriginalCreateProcessW,           HookedCreateProcessW);
     if (OriginalCreateProcessA)           DetourAttach(&(PVOID)OriginalCreateProcessA,           HookedCreateProcessA);
     if (OriginalNetGetJoinInformation)    DetourAttach(&(PVOID)OriginalNetGetJoinInformation,    HookedNetGetJoinInformation);
-    if (g_IsSystemInfo)
+    if (g_IsSystemInfo || g_IsWmic)
     {
         if (OriginalWriteFile)            DetourAttach(&(PVOID)OriginalWriteFile,            HookedWriteFile);
         if (OriginalWriteConsoleA)        DetourAttach(&(PVOID)OriginalWriteConsoleA,        HookedWriteConsoleA);
@@ -1442,6 +1836,15 @@ VOID InitializeHooks(VOID)
     }
 
     DetourTransactionCommit();
+
+    // Confirm injection in DebugView so we know which processes have the agent.
+    {
+        WCHAR procPath[MAX_PATH] = { 0 };
+        GetModuleFileNameW(NULL, procPath, MAX_PATH);
+        WCHAR dbg[MAX_PATH + 64];
+        wsprintfW(dbg, L"[Obs] Agent initialized in: %s\n", procPath);
+        OutputDebugStringW(dbg);
+    }
 }
 
 VOID UninitializeHooks(VOID)
@@ -1468,7 +1871,7 @@ VOID UninitializeHooks(VOID)
     if (OriginalCreateProcessW)           DetourDetach(&(PVOID)OriginalCreateProcessW,           HookedCreateProcessW);
     if (OriginalCreateProcessA)           DetourDetach(&(PVOID)OriginalCreateProcessA,           HookedCreateProcessA);
     if (OriginalNetGetJoinInformation)    DetourDetach(&(PVOID)OriginalNetGetJoinInformation,    HookedNetGetJoinInformation);
-    if (g_IsSystemInfo)
+    if (g_IsSystemInfo || g_IsWmic)
     {
         if (OriginalWriteFile)            DetourDetach(&(PVOID)OriginalWriteFile,            HookedWriteFile);
         if (OriginalWriteConsoleA)        DetourDetach(&(PVOID)OriginalWriteConsoleA,        HookedWriteConsoleA);

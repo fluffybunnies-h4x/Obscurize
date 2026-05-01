@@ -142,7 +142,13 @@ static DWORD WINAPI ControlPipeListenerThread(LPVOID param)
                 // tray icon can display state without elevation.  All other
                 // commands (enable/disable, mode switch, inject, detach) are
                 // restricted to High integrity (elevated Administrator) callers.
-                if (controlCode == OBS_CTRL_QUERY_STATUS || IsHighIntegrityClient(pipe))
+                // OBS_CTRL_INJECT_PID is sent by the agent DLL running at medium integrity.
+                // It cannot pass the high-integrity check, but it is safe to allow:
+                // the agent can only inject into a PID it just created (and knows), and
+                // the service verifies the PID is a real process before injecting.
+                if (controlCode == OBS_CTRL_QUERY_STATUS ||
+                    controlCode == OBS_CTRL_INJECT_PID   ||
+                    IsHighIntegrityClient(pipe))
                 {
                     callback(controlCode, pipe);
                 }

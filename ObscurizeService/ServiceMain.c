@@ -69,15 +69,20 @@ static BOOL EnsureConfigKey(VOID)
 
     if (result != ERROR_SUCCESS) return FALSE;
 
-    // SDDL: BUILTIN\Administrators (BA) full control only.
-    // Standard users query status via the control pipe, not by reading
-    // the registry directly.  Giving AU write access would let any
-    // unprivileged process tamper with config or overwrite the cached
-    // Agent DLL blobs.
+    // SDDL:
+    //   SY – SYSTEM           : full control (service reads + writes config)
+    //   BA – Administrators   : full control (GUI writes mode/enabled/etc.)
+    //   WD – Everyone         : read-only  (agent DLL runs in any process at
+    //                           any integrity level and must read Enabled/Mode;
+    //                           medium-integrity processes have the BA group
+    //                           as deny-only via UAC token filtering, so they
+    //                           fail KEY_QUERY_VALUE without this ACE)
+    // Write access (KEY_SET_VALUE) remains restricted to SY/BA only, so no
+    // unprivileged process can tamper with config or overwrite the Agent DLLs.
     PSECURITY_DESCRIPTOR sd = NULL;
     ULONG sdSize = 0;
     if (ConvertStringSecurityDescriptorToSecurityDescriptorW(
-            L"D:(A;OICI;GA;;;SY)(A;OICI;GA;;;BA)",
+            L"D:(A;OICI;GA;;;SY)(A;OICI;GA;;;BA)(A;OICI;GR;;;WD)",
             SDDL_REVISION_1, &sd, &sdSize))
     {
         RegSetKeySecurity(key, DACL_SECURITY_INFORMATION, sd);
@@ -104,37 +109,6 @@ static BOOL EnsureConfigKey(VOID)
     return TRUE;
 }
 
-/// Cache Agent DLL bytes in the registry so an in-process hook
-/// (if added later) can retrieve them without filesystem access.
-static VOID CacheAgentDllsInRegistry(VOID)
-{
-    HKEY key = NULL;
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, OBS_CONFIG_KEY, 0,
-                      KEY_SET_VALUE | KEY_WOW64_64KEY, &key) != ERROR_SUCCESS)
-        return;
-
-    if (g_AgentDll32 && g_AgentDll32Size)
-        RegSetValueExW(key, OBS_REG_AGENT32_VALUE, 0, REG_BINARY,
-                       g_AgentDll32, g_AgentDll32Size);
-    if (g_AgentDll64 && g_AgentDll64Size)
-        RegSetValueExW(key, OBS_REG_AGENT64_VALUE, 0, REG_BINARY,
-                       g_AgentDll64, g_AgentDll64Size);
-
-    RegCloseKey(key);
-}
-
-/// Remove cached DLL bytes from registry (called on uninstall/shutdown).
-static VOID RemoveCachedAgentDlls(VOID)
-{
-    HKEY key = NULL;
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, OBS_CONFIG_KEY, 0,
-                      KEY_SET_VALUE | KEY_WOW64_64KEY, &key) != ERROR_SUCCESS)
-        return;
-
-    RegDeleteValueW(key, OBS_REG_AGENT32_VALUE);
-    RegDeleteValueW(key, OBS_REG_AGENT64_VALUE);
-    RegCloseKey(key);
-}
 
 // --------------------------------------------------------
 //  Current mode helper
@@ -304,6 +278,24 @@ VOID ObsControlCallback(DWORD controlCode, HANDLE pipe)
             break;
         }
 
+        // ---- Synchronous per-PID injection (sent by HookedCreateProcessW/A) ----
+        // The agent creates wmic.exe suspended, sends this code + the PID, and waits
+        // for our OBS_STATUS_OK reply before calling ResumeThread.  Because InjectDll
+        // is synchronous, the agent DLL is fully installed before we reply.
+        case OBS_CTRL_INJECT_PID:
+        {
+            DWORD pid = 0, bytesRead = 0;
+            if (ReadFile(pipe, &pid, sizeof(DWORD), &bytesRead, NULL)
+                && bytesRead == sizeof(DWORD)
+                && pid != 0)
+            {
+                InjectAgentIntoProcess(pid);
+            }
+            DWORD status = OBS_STATUS_OK, written = 0;
+            WriteFile(pipe, &status, sizeof(DWORD), &written, NULL);
+            break;
+        }
+
     }
 }
 
@@ -364,9 +356,6 @@ BOOL InitializeObscurizeService(VOID)
     // Ensure config registry key exists and is writable by admins.
     if (!EnsureConfigKey()) return FALSE;
 
-    // Store Agent DLL bytes in registry for potential future in-process use.
-    CacheAgentDllsInRegistry();
-
     // Apply artefacts for the current configured mode.
     ApplyModeArtefacts(ReadCurrentMode());
 
@@ -406,9 +395,6 @@ VOID UninitializeObscurizeService(VOID)
 
     // Remove mode artefacts if in Defensive mode.
     RemoveModeArtefacts();
-
-    // Remove cached DLL bytes from registry.
-    RemoveCachedAgentDlls();
 
     // Free DLL byte buffers.
     if (g_AgentDll32) { HeapFree(GetProcessHeap(), 0, g_AgentDll32); g_AgentDll32 = NULL; }

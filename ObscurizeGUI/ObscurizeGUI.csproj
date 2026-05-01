@@ -13,6 +13,12 @@
     <LangVersion>10</LangVersion>
     <AssemblyName>ObscurizeGUI</AssemblyName>
     <RootNamespace>Obscurize</RootNamespace>
+    <Version>1.8.0</Version>
+    <AssemblyVersion>1.8.0.0</AssemblyVersion>
+    <FileVersion>1.8.0.0</FileVersion>
+    <Company>Null-Sec</Company>
+    <Product>Obscurize</Product>
+    <Copyright>Copyright © 2026 Null-Sec</Copyright>
     <!-- Icon rendered programmatically by TrayIconRenderer – no .ico file needed -->
     <!-- Require elevation – the GUI must write to HKLM and talk to LocalSystem -->
     <ApplicationManifest>Properties\app.manifest</ApplicationManifest>

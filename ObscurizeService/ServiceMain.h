@@ -27,13 +27,6 @@
 #define IDR_AGENT_DLL32         101
 #define IDR_AGENT_DLL64         102
 
-// Registry value names under HKLM\SOFTWARE\ObscurizeConfig where
-// the service caches the Agent DLL bytes so the NtResumeThread
-// injection path (when added in a future Agent update) can
-// retrieve them from within any injected process.
-#define OBS_REG_AGENT32_VALUE   L"AgentDll32"
-#define OBS_REG_AGENT64_VALUE   L"AgentDll64"
-
 // --------------------------------------------------------
 //  Globals exported to sub-modules
 // --------------------------------------------------------

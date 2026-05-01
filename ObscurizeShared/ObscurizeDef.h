@@ -212,6 +212,7 @@
 #define OBS_CTRL_DETACH_ALL         0x0007  // Detach agent from all processes
 #define OBS_CTRL_DOMAIN_ENABLE      0x0008  // Enable domain spoofing (PartOfDomain = True)
 #define OBS_CTRL_DOMAIN_DISABLE     0x0009  // Disable domain spoofing (PartOfDomain = False / WORKGROUP)
+#define OBS_CTRL_INJECT_PID         0x000A  // Agent → Service: inject into suspended PID, then reply
 
 // Status reply codes (Service -> GUI)
 #define OBS_STATUS_OK               0x0000

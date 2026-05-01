@@ -63,6 +63,7 @@ Obscurize exploits this behaviour in two directions:
 ┌──────────────▼──────────────────────────────────────────────────┐
 │  ObscurizeService.exe  (Windows Service, LocalSystem, x64)      │
 │  • Monitors new processes via EnumProcesses polling             │
+│  • Synchronous pre-injection for wmic.exe (OBS_CTRL_INJECT_PID)│
 │  • Reflectively injects Agent DLL into every user process       │
 │  • Manages persistent registry / filesystem artefacts           │
 │  • Installs system-wide PowerShell profile.ps1 (WMI hook)       │
@@ -99,14 +100,16 @@ Obscurize exploits this behaviour in two directions:
 | `GlobalMemoryStatusEx` | API hook | 2 048 MB physical RAM |
 | `EnumDisplaySettingsW` | API hook | 800 × 600 resolution |
 | `GetAdaptersAddresses` / `GetAdaptersInfo` | API hook | MAC OUI `00:0C:29` (VMware) |
-| `NtQueryValueKey` (BIOS registry key) | NT hook | VMware BIOS strings |
+| `NtQueryValueKey` (BIOS registry key) | NT hook | VMware BIOS strings (manufacturer, product, serial, UUID) |
 | `GetSystemFirmwareTable` (raw SMBIOS) | API hook | VMware manufacturer / product in RSMB table |
+| `wmic path Win32_BIOS get SerialNumber` | Pre-injection (`CREATE_SUSPENDED` + `NtQueryValueKey` hook) | VMware BIOS serial / UUID |
 | `HKLM\HARDWARE\DESCRIPTION\System\BIOS` | Registry write | VMware manufacturer / product |
 | `HKLM\SOFTWARE\VMware Inc.\VMware Tools` | Registry write | Created (presence check) |
 | `HKLM\SOFTWARE\Oracle\VirtualBox Guest Additions` | Registry write | Created (presence check) |
 | `%TEMP%\mapping.csv`, `VBE_marker.tmp` | Filesystem | **Not** created (absence triggers DEADVAX abort) |
 | PowerShell `Get-WmiObject` / `Get-CimInstance` | profile.ps1 hook | Returns VMware hardware strings, 800×600 resolution, VMware MAC OUI + dynamic `PartOfDomain` / `Domain` from registry |
 | `CreateProcessW/A` (PowerShell spawn) | API hook | Strips `-NoProfile` flag so profile.ps1 always loads |
+| `CreateProcessW/A` (wmic.exe spawn) | API hook | Creates wmic.exe suspended; service injects Agent before first instruction runs |
 | `NetGetJoinInformation` (`Win32_ComputerSystem.PartOfDomain`) | API hook | `WORKGROUP` / `PartOfDomain: False` |
 
 ### Trap Mode (appear as real hardware)
@@ -118,8 +121,9 @@ Obscurize exploits this behaviour in two directions:
 | `GlobalMemoryStatusEx` | API hook | 16 384 MB physical RAM |
 | `EnumDisplaySettingsW` | API hook | 1920 × 1080 resolution |
 | `GetAdaptersAddresses` / `GetAdaptersInfo` | API hook | MAC OUI `00:1B:21` (Intel) |
-| `NtQueryValueKey` (BIOS registry key) | NT hook | Dell BIOS strings |
+| `NtQueryValueKey` (BIOS registry key) | NT hook | Dell BIOS strings (manufacturer, product, serial, UUID) |
 | `GetSystemFirmwareTable` (raw SMBIOS) | API hook | Dell manufacturer / product in RSMB table |
+| `wmic path Win32_BIOS get SerialNumber` | Pre-injection (`CREATE_SUSPENDED`) + WriteConsoleW hook | Dell BIOS serial string |
 | `EnumServicesStatusExW/A` | API hook | VM service names filtered out |
 | `NtQuerySystemInformation` | NT hook | VM process names filtered out |
 | `NtEnumerateKey` / `NtQueryKey` | NT hook | VM vendor registry subkeys filtered from `HKLM\SOFTWARE` |
@@ -127,7 +131,9 @@ Obscurize exploits this behaviour in two directions:
 | `%TEMP%\mapping.csv`, `VBE_marker.tmp` | Filesystem | Created (presence satisfies DEADVAX check) |
 | PowerShell `Get-WmiObject` / `Get-CimInstance` | profile.ps1 hook | Returns spoofed Dell hardware strings, 1920×1080 resolution, Intel MAC OUI + dynamic `PartOfDomain` / `Domain` from registry |
 | `CreateProcessW/A` (PowerShell spawn) | API hook | Strips `-NoProfile` flag so profile.ps1 always loads |
+| `CreateProcessW/A` (wmic.exe spawn) | API hook | Creates wmic.exe suspended; service injects Agent before first instruction runs |
 | `systeminfo.exe` stdout | WriteConsoleW hook | Replaces VMware strings with Dell strings in terminal output |
+| `wmic.exe` stdout | WriteConsoleW hook | Replaces VMware BIOS serial / UUID strings with Dell strings in terminal output |
 | `NetGetJoinInformation` (`Win32_ComputerSystem.PartOfDomain`) | API hook | `CORP.DEV` / `PartOfDomain: True` (when Domain toggle is ON) |
 
 #### PowerShell WMI Spoofing Detail
@@ -155,8 +161,32 @@ stdout writes. Three patterns are replaced before output reaches the terminal:
 | `VMware20,1` (system model) | `Precision 5560` |
 | `VMware, Inc.` (manufacturer) | `Dell Inc.` |
 
-The hook only activates in `systeminfo.exe` to avoid overhead in all other
-processes.
+The hook only activates in `systeminfo.exe` and `wmic.exe` to avoid overhead
+in all other processes.
+
+#### wmic.exe Serial Number Patching Detail
+
+`wmic path Win32_BIOS get SerialNumber` (and equivalent UUID / manufacturer
+queries) is a common malware TTP for detecting VM environments via SMBIOS
+Type 1 data. The challenge is timing: wmic.exe resolves its WMI query and
+terminates in under 200 ms. The service's 100 ms `EnumProcesses` poll
+typically fires ~80 ms after wmic.exe starts — after the query has already
+completed — leaving a window where the real BIOS serial number is returned.
+
+To close this gap, the `CreateProcessW/A` hook detects when the spawning
+process is launching `wmic.exe` and automatically adds `CREATE_SUSPENDED` to
+the creation flags before delegating to the real `CreateProcessW`. It then
+sends an `OBS_CTRL_INJECT_PID` message to the service pipe (a two-DWORD
+request: control code + PID), waits for the service to confirm injection, and
+only then calls `ResumeThread`. The round-trip completes in under 20 ms,
+ensuring the Agent and its `NtQueryValueKey` hook are fully installed before
+wmic.exe executes a single instruction.
+
+The `WriteFile` / `WriteConsoleA` / `WriteConsoleW` hooks are also installed
+in the wmic.exe process (same as `systeminfo.exe`) to patch any VMware strings
+in stdout before they reach the terminal, providing a second interception layer
+for cases where the SMBIOS data flows through a code path not covered by
+`NtQueryValueKey`.
 
 #### Domain Join Spoofing Detail
 
@@ -194,7 +224,7 @@ under `HKLM\SOFTWARE\ObscurizeConfig`.
 
 The Agent installs up to 22 Detours hooks per process. The WriteFile /
 WriteConsoleA / WriteConsoleW hooks are only installed when the host process
-is `systeminfo.exe`.
+is `systeminfo.exe` or `wmic.exe`.
 
 | Hook | DLL | Defensive | Trap |
 |---|---|---|---|
@@ -214,11 +244,11 @@ is `systeminfo.exe`.
 | `NtQueryKey` | ntdll | Pass-through | Corrects SubKeys count after filtering |
 | `NtQueryValueKey` | ntdll | VMware BIOS strings | Dell BIOS strings |
 | `GetSystemFirmwareTable` | kernel32 | VMware strings in RSMB table | Dell strings in RSMB table |
-| `CreateProcessW` | kernel32 | Strips `-NoProfile` from PowerShell spawns | Strips `-NoProfile` from PowerShell spawns |
-| `CreateProcessA` | kernel32 | Strips `-NoProfile` from PowerShell spawns | Strips `-NoProfile` from PowerShell spawns |
-| `WriteFile` | kernelbase | — | Patches systeminfo.exe stdout (VM→Dell strings) |
-| `WriteConsoleA` | kernelbase | — | Patches systeminfo.exe stdout (VM→Dell strings) |
-| `WriteConsoleW` | kernelbase | — | Patches systeminfo.exe stdout via ConPTY path |
+| `CreateProcessW` | kernel32 | Strips `-NoProfile` from PS spawns; creates wmic.exe suspended for pre-injection | Strips `-NoProfile` from PS spawns; creates wmic.exe suspended for pre-injection |
+| `CreateProcessA` | kernel32 | Strips `-NoProfile` from PS spawns; creates wmic.exe suspended for pre-injection | Strips `-NoProfile` from PS spawns; creates wmic.exe suspended for pre-injection |
+| `WriteFile` | kernelbase | — | Patches systeminfo.exe and wmic.exe stdout (VM→Dell strings) |
+| `WriteConsoleA` | kernelbase | — | Patches systeminfo.exe and wmic.exe stdout (VM→Dell strings) |
+| `WriteConsoleW` | kernelbase | — | Patches systeminfo.exe and wmic.exe stdout via ConPTY path |
 | `NetGetJoinInformation` | netapi32 | `WORKGROUP` / `PartOfDomain: False` | `CORP.DEV` / `PartOfDomain: True` (when Domain ON) |
 
 ---
@@ -245,13 +275,13 @@ every 1 second. Mode and spoof-value changes propagate to all processes within
 **kernelbase.dll resolution for stdout hooks** — Modern Windows executables
 import `WriteFile` and `WriteConsoleA/W` directly from `kernelbase.dll` via
 the ApiSet contract, bypassing the `kernel32.dll` forwarding stubs. The
-systeminfo hooks resolve from `kernelbase.dll` directly to ensure Detours
-patches the actual implementation rather than an un-called stub.
+systeminfo.exe and wmic.exe hooks resolve from `kernelbase.dll` directly to
+ensure Detours patches the actual implementation rather than an un-called stub.
 
-**ConPTY / Windows Terminal handling** — When systeminfo.exe runs inside
-Windows Terminal or a PowerShell ConPTY session, its UCRT detects a console
-handle and calls `WriteConsoleW` (wide Unicode) rather than `WriteFile` or
-`WriteConsoleA`. All three code paths are hooked to guarantee coverage
+**ConPTY / Windows Terminal handling** — When systeminfo.exe or wmic.exe runs
+inside Windows Terminal or a PowerShell ConPTY session, its UCRT detects a
+console handle and calls `WriteConsoleW` (wide Unicode) rather than `WriteFile`
+or `WriteConsoleA`. All three code paths are hooked to guarantee coverage
 regardless of the invoking shell.
 
 **-NoProfile bypass prevention** — Malware and post-exploitation frameworks
@@ -260,6 +290,20 @@ profile-based hooks. The `CreateProcessW/A` hook walks the command-line token
 by token and silently removes any `-noprofile` / `-nop` / `-nopr` token
 (case-insensitive prefix match, minimum 3 body characters) before the child
 process is created.
+
+**Synchronous pre-injection for wmic.exe** — The service's 100 ms
+`EnumProcesses` poll fires ~80 ms after a new process is created. For
+long-lived processes this is inconsequential, but `wmic.exe` completes its WMI
+query and terminates in under 200 ms, leaving a window where the real BIOS
+serial number is returned before the Agent is injected. When a hooked process
+calls `CreateProcessW/A` with `wmic.exe` as the target, the hook adds
+`CREATE_SUSPENDED` to the creation flags (preserving the flag if already set),
+sends an `OBS_CTRL_INJECT_PID` message (two DWORDs: control code + PID) to the
+service pipe, waits for a status reply, and then calls `ResumeThread`. The
+round-trip completes in under 20 ms. The `OBS_CTRL_INJECT_PID` code bypasses
+the high-integrity pipe check — the sending Agent runs at medium integrity —
+but the server never calls `ImpersonateNamedPipeClient` for this code, so the
+bypass grants no elevation path.
 
 **EnumDisplaySettingsW robustness** — The hook calls the original
 `EnumDisplaySettingsW` to populate other `DEVMODE` fields (bit depth,
@@ -557,6 +601,7 @@ query also returns a 4-byte reply.
 | `OBS_CTRL_DETACH_ALL` | `0x0007` | Detach from all processes |
 | `OBS_CTRL_DOMAIN_ENABLE` | `0x0008` | Enable domain spoofing (`PartOfDomain: True`, domain `CORP.DEV`) |
 | `OBS_CTRL_DOMAIN_DISABLE` | `0x0009` | Disable domain spoofing (`PartOfDomain: False`, `WORKGROUP`) |
+| `OBS_CTRL_INJECT_PID` | `0x000A` | Agent→Service: inject Agent into a suspended process. Send two DWORDs (control code + PID); service replies with a status DWORD. Bypasses high-integrity check — the sending agent runs at medium integrity. |
 
 ---
 
@@ -583,13 +628,27 @@ protocol level rather than the ACL level:
 
 ### Configuration registry ACL
 
-`HKLM\SOFTWARE\ObscurizeConfig` is created with a DACL granting full access
-to `NT AUTHORITY\SYSTEM` (so the service can read and write its own config)
-and `BUILTIN\Administrators` (so the elevated GUI can write mode and enable
-values). Standard users and Authenticated Users have no access. This prevents
-an unprivileged process from tampering with the embedded Agent DLL blobs
-(`AgentDll32` / `AgentDll64`) stored in that key, which the service loads
-and injects into every running process.
+`HKLM\SOFTWARE\ObscurizeConfig` is created with a three-entry DACL:
+
+| Principal | Access |
+|---|---|
+| `NT AUTHORITY\SYSTEM` | Full control — service reads and writes its own config |
+| `BUILTIN\Administrators` | Full control — elevated GUI writes mode and enable values |
+| `Everyone` | Generic Read (`KEY_QUERY_VALUE \| KEY_ENUMERATE_SUB_KEYS \| KEY_NOTIFY`) — allows the injected Agent to read `Enabled` and `Mode` from any integrity level |
+
+The Everyone read-only ACE is required because the Agent is injected into
+processes running at **medium integrity** (standard user sessions, cmd.exe,
+PowerShell). Without it, UAC token filtering marks `BUILTIN\Administrators`
+as deny-only in medium-integrity tokens, causing `RegOpenKeyExW` to return
+`ACCESS_DENIED` and `ObsIsEnabled()` to default to `FALSE` — leaving those
+processes unhooked.
+
+The Agent DLL bytes previously stored as `AgentDll32` / `AgentDll64` values
+in this key have been removed. The service now injects directly from the
+in-memory PE resource buffers (RCDATA IDs 101/102 embedded in the service
+EXE), so no binary blobs are written to the registry. This also eliminates
+any concern about PE bytes being readable by unprivileged callers under the
+Everyone read ACE.
 
 ### Injection exclusions
 
