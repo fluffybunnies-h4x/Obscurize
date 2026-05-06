@@ -198,22 +198,30 @@ which gates full payload delivery on `Win32_ComputerSystem.PartOfDomain` being
 and `Get-CimInstance Win32_ComputerSystem` execute inside `WmiPrvSE.exe`, not
 the calling PowerShell process. API hooks in the PowerShell process never fire
 for WMI-sourced data. The system-wide `profile.ps1` intercepts these calls and
-reads `DomainEnabled` from `HKLM\SOFTWARE\ObscurizeConfig` dynamically at
+reads `DomainMode` from `HKLM\SOFTWARE\ObscurizeConfig` dynamically at
 query execution time, setting `PartOfDomain` and `Domain` on the returned
-object without requiring a profile regeneration when the toggle changes.
+object without requiring a profile regeneration when the mode changes.
+When `DomainMode=0` (Off), the profile leaves the real WMI values untouched.
 
 **Layer 2 — Direct Win32 callers (NetGetJoinInformation hook):** Malware that
 calls `NetGetJoinInformation` in `netapi32.dll` directly (outside of WMI) is
 intercepted by the Agent hook installed in that process.
 
-The Domain toggle is independent of Defensive / Trap mode and is available
-in both. It is controlled from a dedicated button in the GUI control panel
-and persisted to `HKLM\SOFTWARE\ObscurizeConfig\DomainEnabled`.
+The Domain selector is independent of Defensive / Trap mode and is available
+in both. It is controlled from a three-button selector in the GUI control
+panel and persisted to `HKLM\SOFTWARE\ObscurizeConfig\DomainMode`.
 
-| Domain toggle | `PartOfDomain` | `Domain` |
-|---|---|---|
-| OFF (default) | `False` | `WORKGROUP` |
-| ON | `True` | `CORP.DEV` |
+| Domain mode | `DomainMode` value | `PartOfDomain` | `Domain` |
+|---|---|---|---|
+| **Off** (default) | `0` | Real value (hook inactive) | Real value |
+| **Workgroup** | `1` | `False` | `WORKGROUP` |
+| **Joined** | `2` | `True` | `CORP.DEV` |
+
+**Off mode** disables the hook entirely so the real domain join state is
+returned. This is the recommended setting when running Obscurize on a
+domain-joined machine where you need to reach network shares, printers,
+and other domain resources — spoofing `PartOfDomain: False` would break
+Kerberos ticket acquisition and UNC path resolution.
 
 The domain name is configurable via the `SpoofDomainName` registry value
 under `HKLM\SOFTWARE\ObscurizeConfig`.
@@ -446,7 +454,7 @@ On the very first run the service creates
 |---|---|
 | `Enabled` | `0` (off) |
 | `Mode` | `1` (Defensive) |
-| `DomainEnabled` | `0` (off) |
+| `DomainMode` | `0` (Off — pass-through) |
 
 The control panel will open showing **INACTIVE**. Click the power button
 to activate, select a mode, and optionally enable the domain spoof.
@@ -599,9 +607,10 @@ query also returns a 4-byte reply.
 | `OBS_CTRL_QUERY_STATUS` | `0x0005` | Query status (reply: 1=disabled, 2=defensive, 3=trap) |
 | `OBS_CTRL_INJECT_ALL` | `0x0006` | Force inject into all running processes |
 | `OBS_CTRL_DETACH_ALL` | `0x0007` | Detach from all processes |
-| `OBS_CTRL_DOMAIN_ENABLE` | `0x0008` | Enable domain spoofing (`PartOfDomain: True`, domain `CORP.DEV`) |
-| `OBS_CTRL_DOMAIN_DISABLE` | `0x0009` | Disable domain spoofing (`PartOfDomain: False`, `WORKGROUP`) |
+| `OBS_CTRL_DOMAIN_OFF` | `0x0008` | Domain hook disabled — real domain info returned |
+| `OBS_CTRL_DOMAIN_WORKGROUP` | `0x0009` | Force `PartOfDomain: False` / `WORKGROUP` |
 | `OBS_CTRL_INJECT_PID` | `0x000A` | Agent→Service: inject Agent into a suspended process. Send two DWORDs (control code + PID); service replies with a status DWORD. Bypasses high-integrity check — the sending agent runs at medium integrity. |
+| `OBS_CTRL_DOMAIN_JOINED` | `0x000B` | Force `PartOfDomain: True` / `CORP.DEV` |
 
 ---
 

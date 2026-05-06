@@ -26,8 +26,13 @@
 #define OBS_CONFIG_VALUE_USERNAME   L"SpoofUsername" // SZ     Trap mode username
 #define OBS_CONFIG_VALUE_COMPNAME   L"SpoofCompName" // SZ     Trap mode computer name
 #define OBS_CONFIG_VALUE_MACVENDOR  L"SpoofMacOUI"   // BINARY 3 bytes OUI for Trap MAC
-#define OBS_CONFIG_VALUE_DOMAIN_ENABLED L"DomainEnabled"   // DWORD  0/1
+#define OBS_CONFIG_VALUE_DOMAIN_MODE    L"DomainMode"      // DWORD  0=off/pass-through 1=WORKGROUP 2=domain-joined
 #define OBS_CONFIG_VALUE_DOMAIN_NAME    L"SpoofDomainName" // SZ     spoofed domain name
+
+// Domain mode constants
+#define OBS_DOMAIN_MODE_OFF         0   // Hook disabled; real domain info returned
+#define OBS_DOMAIN_MODE_WORKGROUP   1   // Force WORKGROUP / PartOfDomain: False
+#define OBS_DOMAIN_MODE_JOINED      2   // Force domain-joined / PartOfDomain: True
 
 // ------------------------------------------------------------
 //  Registry – VM artefacts written/removed by the Service
@@ -140,9 +145,9 @@
 //  Domain spoof values  (used by NetGetJoinInformation hook)
 // ------------------------------------------------------------
 
-/// Domain name returned when DomainEnabled = 1
+/// Domain name returned when DomainMode = OBS_DOMAIN_MODE_JOINED
 #define OBS_SPOOF_DOMAIN_ACTIVE     L"CORP.DEV"
-/// Workgroup name returned when DomainEnabled = 0
+/// Workgroup name returned when DomainMode = OBS_DOMAIN_MODE_WORKGROUP
 #define OBS_SPOOF_DOMAIN_INACTIVE   L"WORKGROUP"
 
 // PowerShell system-wide profile – installed by ArtefactManager to hook Get-WmiObject/Get-CimInstance
@@ -210,9 +215,10 @@
 #define OBS_CTRL_QUERY_STATUS       0x0005  // Request status reply
 #define OBS_CTRL_INJECT_ALL         0x0006  // Re-inject agent into all processes
 #define OBS_CTRL_DETACH_ALL         0x0007  // Detach agent from all processes
-#define OBS_CTRL_DOMAIN_ENABLE      0x0008  // Enable domain spoofing (PartOfDomain = True)
-#define OBS_CTRL_DOMAIN_DISABLE     0x0009  // Disable domain spoofing (PartOfDomain = False / WORKGROUP)
+#define OBS_CTRL_DOMAIN_OFF         0x0008  // Domain hook disabled – real domain info returned
+#define OBS_CTRL_DOMAIN_WORKGROUP   0x0009  // Force WORKGROUP / PartOfDomain = False
 #define OBS_CTRL_INJECT_PID         0x000A  // Agent → Service: inject into suspended PID, then reply
+#define OBS_CTRL_DOMAIN_JOINED      0x000B  // Force domain-joined / PartOfDomain = True
 
 // Status reply codes (Service -> GUI)
 #define OBS_STATUS_OK               0x0000
@@ -256,6 +262,12 @@
     L"SecurityHealthService.exe", \
     /* Shell and UI hosts – hooking these causes Explorer hangs/crashes */ \
     L"explorer.exe",             \
+    /* MMC snap-in host – snap-ins use GetComputerNameExW to open       \
+       \\COMPUTERNAME\IPC$ even for local management; the spoofed name  \
+       fails to resolve, breaking Device Manager, Disk Management, etc. \
+       No malware exposure: snap-ins are operator tools, not execution   \
+       paths for samples */                                              \
+    L"mmc.exe",                  \
     L"ShellExperienceHost.exe",  \
     L"StartMenuExperienceHost.exe", \
     L"SearchHost.exe",           \
@@ -319,6 +331,28 @@
     L"upc.exe",                  \
     L"Battle.net.exe",           \
     L"Battle.net Launcher.exe",  \
+    /* Sysmon – kernel driver (SysmonDrv) is Ring 0 and unaffected;    \
+       user-mode service is excluded because (a) injecting into a      \
+       security monitor is a stability hazard, and (b) the computer-   \
+       name hook would tag Sysmon's XML events with the spoofed host,  \
+       breaking SIEM correlation on the defending side */              \
+    L"Sysmon.exe",               \
+    L"Sysmon64.exe",             \
+    /* Log shippers and forwarders – GetComputerNameExW runs inside    \
+       these processes, so every event forwarded to a SIEM would carry \
+       the spoofed hostname, corrupting log correlation.  No malware   \
+       ever executes inside a log forwarder */                         \
+    L"nxlog.exe",                \
+    L"nxlog-ce.exe",             \
+    L"winlogbeat.exe",           \
+    L"filebeat.exe",             \
+    L"metricbeat.exe",           \
+    L"elastic-agent.exe",        \
+    L"splunkd.exe",              \
+    L"splunk.exe",               \
+    L"fluent-bit.exe",           \
+    L"fluentd.exe",              \
+    L"wazuh-agent.exe",          \
     NULL }
 
 #endif  // _OBSCURIZE_DEF_H

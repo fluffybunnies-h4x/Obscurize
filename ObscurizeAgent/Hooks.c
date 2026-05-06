@@ -1691,8 +1691,9 @@ static BOOL WINAPI HookedWriteConsoleW(
 //    Get-WmiObject  -Class Win32_ComputerSystem | Select PartOfDomain
 //    Get-CimInstance -ClassName Win32_ComputerSystem | Select PartOfDomain
 //
-//  When DomainEnabled = 0: reports WORKGROUP  / PartOfDomain = False
-//  When DomainEnabled = 1: reports CORP.LOCAL / PartOfDomain = True
+//  When DomainMode = 0 (OFF):       passes through – real domain info returned
+//  When DomainMode = 1 (WORKGROUP): reports WORKGROUP / PartOfDomain = False
+//  When DomainMode = 2 (JOINED):    reports CORP.DEV  / PartOfDomain = True
 // ============================================================
 
 // NetSetupJoinStatus values (from lmjoin.h – defined inline to avoid lm.h dependency)
@@ -1712,9 +1713,13 @@ static DWORD WINAPI HookedNetGetJoinInformation(
     if (!ObsIsEnabled() || !lpNameBuffer || !BufferType)
         return OriginalNetGetJoinInformation(lpServer, lpNameBuffer, BufferType);
 
+    DWORD domainMode = ObsGetDomainMode();
+    if (domainMode == OBS_DOMAIN_MODE_OFF)
+        return OriginalNetGetJoinInformation(lpServer, lpNameBuffer, BufferType);
+
     WCHAR domainName[256];
     ObsGetSpoofDomainName(domainName, 256);
-    DWORD spoofStatus = ObsGetDomainEnabled()
+    DWORD spoofStatus = (domainMode == OBS_DOMAIN_MODE_JOINED)
                         ? OBS_NetSetupDomainName
                         : OBS_NetSetupWorkgroupName;
 

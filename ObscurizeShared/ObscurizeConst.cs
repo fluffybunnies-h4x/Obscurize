@@ -23,8 +23,15 @@ namespace Obscurize
         public const string ConfigValueUsername = "SpoofUsername";
         public const string ConfigValueCompName = "SpoofCompName";
         public const string ConfigValueMacOUI          = "SpoofMacOUI";
-        public const string ConfigValueDomainEnabled   = "DomainEnabled";
+        public const string ConfigValueDomainMode      = "DomainMode";
         public const string ConfigValueDomainName      = "SpoofDomainName";
+
+        // --------------------------------------------------------
+        //  Domain mode constants
+        // --------------------------------------------------------
+        public const int DomainModeOff       = 0;   // Hook disabled; real domain info returned
+        public const int DomainModeWorkgroup = 1;   // Force WORKGROUP / PartOfDomain: False
+        public const int DomainModeJoined    = 2;   // Force domain-joined / PartOfDomain: True
 
         // --------------------------------------------------------
         //  Registry – VM artefact keys (Defensive creates / Trap removes)
@@ -86,8 +93,9 @@ namespace Obscurize
         public const int CtrlQueryStatus       = 0x0005;
         public const int CtrlInjectAll         = 0x0006;
         public const int CtrlDetachAll         = 0x0007;
-        public const int CtrlDomainEnable      = 0x0008;
-        public const int CtrlDomainDisable     = 0x0009;
+        public const int CtrlDomainOff         = 0x0008;
+        public const int CtrlDomainWorkgroup   = 0x0009;
+        public const int CtrlDomainJoined      = 0x000B;
 
         // Status reply codes  (Service -> GUI)
         public const int StatusOk              = 0x0000;

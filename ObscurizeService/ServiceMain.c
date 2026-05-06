@@ -101,7 +101,7 @@ static BOOL EnsureConfigKey(VOID)
                        (LPBYTE)&defaultEnabled, sizeof(DWORD));
         RegSetValueExW(key, OBS_CONFIG_VALUE_MODE, 0, REG_DWORD,
                        (LPBYTE)&defaultMode, sizeof(DWORD));
-        RegSetValueExW(key, OBS_CONFIG_VALUE_DOMAIN_ENABLED, 0, REG_DWORD,
+        RegSetValueExW(key, OBS_CONFIG_VALUE_DOMAIN_MODE, 0, REG_DWORD,
                        (LPBYTE)&defaultDomain, sizeof(DWORD));
     }
 
@@ -250,16 +250,19 @@ VOID ObsControlCallback(DWORD controlCode, HANDLE pipe)
             break;
         }
 
-        // ---- Domain spoofing toggle ----
-        case OBS_CTRL_DOMAIN_ENABLE:
-        case OBS_CTRL_DOMAIN_DISABLE:
+        // ---- Domain mode ----
+        case OBS_CTRL_DOMAIN_OFF:
+        case OBS_CTRL_DOMAIN_WORKGROUP:
+        case OBS_CTRL_DOMAIN_JOINED:
         {
-            DWORD val = (controlCode == OBS_CTRL_DOMAIN_ENABLE) ? 1 : 0;
+            DWORD val = (controlCode == OBS_CTRL_DOMAIN_JOINED)   ? OBS_DOMAIN_MODE_JOINED
+                      : (controlCode == OBS_CTRL_DOMAIN_WORKGROUP) ? OBS_DOMAIN_MODE_WORKGROUP
+                      :                                              OBS_DOMAIN_MODE_OFF;
             HKEY key;
             if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, OBS_CONFIG_KEY, 0,
                               KEY_SET_VALUE | KEY_WOW64_64KEY, &key) == ERROR_SUCCESS)
             {
-                RegSetValueExW(key, OBS_CONFIG_VALUE_DOMAIN_ENABLED, 0, REG_DWORD,
+                RegSetValueExW(key, OBS_CONFIG_VALUE_DOMAIN_MODE, 0, REG_DWORD,
                                (LPBYTE)&val, sizeof(DWORD));
                 RegCloseKey(key);
             }

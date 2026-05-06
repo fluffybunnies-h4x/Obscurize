@@ -30,7 +30,7 @@ static POBS_CONFIG ReadConfigFromRegistry(VOID)
     static const BYTE trapOUI[] = OBS_TRAP_MAC_OUI;
     CopyMemory(cfg->SpoofMacOUI, trapOUI, 3);
     cfg->CustomMacOUI = FALSE;
-    cfg->DomainEnabled = FALSE;
+    cfg->DomainMode = OBS_DOMAIN_MODE_OFF;
     StringCchCopyW(cfg->SpoofDomainName, 256, OBS_SPOOF_DOMAIN_ACTIVE);
 
     HKEY key = NULL;
@@ -78,12 +78,12 @@ static POBS_CONFIG ReadConfigFromRegistry(VOID)
         cfg->CustomMacOUI = TRUE;
     }
 
-    // DomainEnabled
+    // DomainMode
     size = sizeof(DWORD);
-    if (RegQueryValueExW(key, OBS_CONFIG_VALUE_DOMAIN_ENABLED, NULL, &type,
+    if (RegQueryValueExW(key, OBS_CONFIG_VALUE_DOMAIN_MODE, NULL, &type,
                          (LPBYTE)&value, &size) == ERROR_SUCCESS && type == REG_DWORD)
     {
-        cfg->DomainEnabled = (value != 0);
+        cfg->DomainMode = (value <= OBS_DOMAIN_MODE_JOINED) ? value : OBS_DOMAIN_MODE_OFF;
     }
 
     // Domain name override
@@ -273,11 +273,11 @@ VOID ObsGetSpoofResolution(PDWORD width, PDWORD height)
     }
 }
 
-BOOL ObsGetDomainEnabled(VOID)
+DWORD ObsGetDomainMode(VOID)
 {
     EnterCriticalSection(&s_configLock);
     POBS_CONFIG cfg = (POBS_CONFIG)s_config;
-    BOOL result = cfg ? cfg->DomainEnabled : FALSE;
+    DWORD result = cfg ? cfg->DomainMode : OBS_DOMAIN_MODE_OFF;
     LeaveCriticalSection(&s_configLock);
     return result;
 }
@@ -286,7 +286,7 @@ VOID ObsGetSpoofDomainName(PWCHAR buf, DWORD bufCch)
 {
     EnterCriticalSection(&s_configLock);
     POBS_CONFIG cfg = (POBS_CONFIG)s_config;
-    if (cfg && cfg->DomainEnabled)
+    if (cfg && cfg->DomainMode == OBS_DOMAIN_MODE_JOINED)
         StringCchCopyW(buf, bufCch, cfg->SpoofDomainName);
     else
         StringCchCopyW(buf, bufCch, OBS_SPOOF_DOMAIN_INACTIVE);

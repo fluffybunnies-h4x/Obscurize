@@ -62,7 +62,7 @@ try {
 
 $enabled     = [bool]($cfg.Enabled)
 $mode        = $cfg.Mode          # 1=Defensive  2=Trap
-$domEnabled  = [bool]($cfg.DomainEnabled)
+$domMode     = [int]($cfg.DomainMode)   # 0=Off/pass-through  1=WORKGROUP  2=Joined
 $spoofDomain = if ($cfg.SpoofDomainName) { $cfg.SpoofDomainName } else { "CORP.DEV" }
 $spoofUser   = if ($cfg.SpoofUsername)   { $cfg.SpoofUsername   } else { "jsmith" }           # OBS_TRAP_USERNAME_DEFAULT
 $spoofComp   = if ($cfg.SpoofCompName)   { $cfg.SpoofCompName   } else { "DESKTOP-J8K3M2" }   # OBS_TRAP_COMPNAME_DEFAULT
@@ -70,8 +70,11 @@ $spoofComp   = if ($cfg.SpoofCompName)   { $cfg.SpoofCompName   } else { "DESKTO
 $modeStr = switch ($mode) { 1 { "DEFENSIVE" } 2 { "TRAP" } default { "UNKNOWN ($mode)" } }
 $defMode = ($mode -eq 1)
 
-$domStr = if ($domEnabled) { "ON  -> PartOfDomain: True, Domain: $spoofDomain" } `
-                           else { "OFF -> PartOfDomain: False, Domain: WORKGROUP" }
+$domStr = switch ($domMode) {
+    2       { "JOINED     -> PartOfDomain: True,  Domain: $spoofDomain" }
+    1       { "WORKGROUP  -> PartOfDomain: False, Domain: WORKGROUP" }
+    default { "OFF        -> Pass-through (real domain info returned)" }
+}
 
 Write-Host ""
 Write-Host "  =======================================" -ForegroundColor Cyan
@@ -83,8 +86,8 @@ $enabledStr   = if ($enabled) { "YES"   } else { "NO - enable Obscurize first" }
 Write-Host ("  Service Enabled : {0}" -f $enabledStr)   -ForegroundColor $enabledColor
 $modeColor = if ($defMode) { "Cyan" } else { "Magenta" }
 Write-Host ("  Active Mode     : {0}" -f $modeStr)      -ForegroundColor $modeColor
-$domColor = if ($domEnabled) { "Green" } else { "DarkGray" }
-Write-Host ("  Domain Toggle   : {0}" -f $domStr)       -ForegroundColor $domColor
+$domColor = switch ($domMode) { 2 { "Green" } 1 { "DarkYellow" } default { "DarkGray" } }
+Write-Host ("  Domain Mode     : {0}" -f $domStr)       -ForegroundColor $domColor
 
 if (-not $enabled) {
     Write-Host "`n  Obscurize is disabled. Enable it in the GUI and re-run.`n" -ForegroundColor Red
@@ -226,21 +229,25 @@ if ($ret -eq 0 -and $nameBuf -ne [IntPtr]::Zero) {
 }
 $joinType = switch ($bufType) { 2 { "Workgroup" } 3 { "Domain" } default { "Unknown ($bufType)" } }
 
-if ($domEnabled) {
+if ($domMode -eq 2) {
     Write-Check "NetGetJoinInformation (name)"       $spoofDomain  $joinName  "HOOK"
     Write-Check "NetGetJoinInformation (type)"       "Domain"      $joinType  "HOOK"
+} elseif ($domMode -eq 1) {
+    Write-Check "NetGetJoinInformation (name)"       "WORKGROUP"   $joinName  "HOOK"
+    Write-Check "NetGetJoinInformation (type)"       "Workgroup"   $joinType  "HOOK"
 } else {
-    Write-Check "NetGetJoinInformation (name)"       "WORKGROUP"  $joinName  "HOOK"
-    Write-Check "NetGetJoinInformation (type)"       "Workgroup"  $joinType  "HOOK"
+    Write-Host ("    [PASS-THROUGH]  NetGetJoinInformation  →  $joinName ($joinType)") -ForegroundColor DarkGray
 }
 
 $cs = Get-WmiObject Win32_ComputerSystem
-if ($domEnabled) {
+if ($domMode -eq 2) {
     Write-Check "Win32_ComputerSystem.PartOfDomain"  "True"        "$($cs.PartOfDomain)"  "WMI"
     Write-Check "Win32_ComputerSystem.Domain"        $spoofDomain  "$($cs.Domain)"        "WMI"
-} else {
+} elseif ($domMode -eq 1) {
     Write-Check "Win32_ComputerSystem.PartOfDomain"  "False"       "$($cs.PartOfDomain)"  "WMI"
     Write-Check "Win32_ComputerSystem.Domain"        "WORKGROUP"   "$($cs.Domain)"        "WMI"
+} else {
+    Write-Host ("    [PASS-THROUGH]  Win32_ComputerSystem  PartOfDomain=$($cs.PartOfDomain)  Domain=$($cs.Domain)") -ForegroundColor DarkGray
 }
 
 # ---------------------------------------------------------------------------
@@ -390,7 +397,8 @@ Write-Host "    profile.ps1 only covers PowerShell callers." -ForegroundColor Da
 
 Write-Host ""
 Write-Host ("-" * 70) -ForegroundColor DarkGray
-Write-Host ("  Done.  Mode: {0}  |  Domain: {1}" -f $modeStr, $(if ($domEnabled) { "ON ($spoofDomain)" } else { "OFF (WORKGROUP)" })) -ForegroundColor Cyan
+$domSummary = switch ($domMode) { 2 { "JOINED ($spoofDomain)" } 1 { "WORKGROUP" } default { "OFF (pass-through)" } }
+Write-Host ("  Done.  Mode: {0}  |  Domain: {1}" -f $modeStr, $domSummary) -ForegroundColor Cyan
 Write-Host ("-" * 70) -ForegroundColor DarkGray
 Write-Host ""
 Write-Host "  [PASS] = value matches expected spoof output" -ForegroundColor Green

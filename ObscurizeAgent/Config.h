@@ -27,8 +27,8 @@ typedef struct _OBS_CONFIG
     BOOL  CustomMacOUI;                     // TRUE if SpoofMacOUI was set in registry
 
     // Domain spoofing (independent of Defensive/Trap mode)
-    BOOL  DomainEnabled;                    // TRUE = report as domain-joined
-    WCHAR SpoofDomainName[256];             // Domain name when DomainEnabled (default CORP.LOCAL)
+    DWORD DomainMode;                       // OBS_DOMAIN_MODE_OFF/WORKGROUP/JOINED
+    WCHAR SpoofDomainName[256];             // Domain name when DomainMode=JOINED (default CORP.DEV)
 } OBS_CONFIG, *POBS_CONFIG;
 
 // ------------------------------------------------------------
@@ -80,12 +80,17 @@ ULONGLONG ObsGetSpoofMemoryBytes(VOID);
 /// </summary>
 VOID ObsGetSpoofResolution(PDWORD width, PDWORD height);
 
-/// <summary>Returns TRUE if domain spoofing is enabled.</summary>
-BOOL ObsGetDomainEnabled(VOID);
+/// <summary>
+/// Returns the current domain mode:
+///   OBS_DOMAIN_MODE_OFF (0)       — hook disabled, real domain info returned
+///   OBS_DOMAIN_MODE_WORKGROUP (1) — force WORKGROUP / PartOfDomain: False
+///   OBS_DOMAIN_MODE_JOINED (2)    — force domain-joined / PartOfDomain: True
+/// </summary>
+DWORD ObsGetDomainMode(VOID);
 
 /// <summary>
 /// Fills <paramref name="buf"/> with the spoofed domain name when
-/// DomainEnabled is TRUE, or WORKGROUP when FALSE.
+/// DomainMode == JOINED, or WORKGROUP otherwise.
 /// Buffer must be at least 256 WCHARs.
 /// </summary>
 VOID ObsGetSpoofDomainName(PWCHAR buf, DWORD bufCch);
