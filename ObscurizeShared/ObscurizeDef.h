@@ -17,17 +17,24 @@
 
 // ------------------------------------------------------------
 //  Registry – configuration store
-//  HKEY_LOCAL_MACHINE\SOFTWARE\ObscurizeConfig
+//  HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows NT\CurrentVersion\DeviceCache
+//
+//  Stored under an innocuous Windows-style path. Value names are
+//  chosen to blend with legitimate device-management entries.
 // ------------------------------------------------------------
 
-#define OBS_CONFIG_KEY              L"SOFTWARE\\ObscurizeConfig"
-#define OBS_CONFIG_VALUE_ENABLED    L"Enabled"       // DWORD  0/1
-#define OBS_CONFIG_VALUE_MODE       L"Mode"          // DWORD  OBS_MODE_*
-#define OBS_CONFIG_VALUE_USERNAME   L"SpoofUsername" // SZ     Trap mode username
-#define OBS_CONFIG_VALUE_COMPNAME   L"SpoofCompName" // SZ     Trap mode computer name
-#define OBS_CONFIG_VALUE_MACVENDOR  L"SpoofMacOUI"   // BINARY 3 bytes OUI for Trap MAC
-#define OBS_CONFIG_VALUE_DOMAIN_MODE    L"DomainMode"      // DWORD  0=off/pass-through 1=WORKGROUP 2=domain-joined
-#define OBS_CONFIG_VALUE_DOMAIN_NAME    L"SpoofDomainName" // SZ     spoofed domain name
+#define OBS_CONFIG_KEY              L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\DeviceCache"
+#define OBS_CONFIG_VALUE_ENABLED    L"DeviceState"      // DWORD  0/1
+#define OBS_CONFIG_VALUE_MODE       L"CacheLevel"       // DWORD  OBS_MODE_*
+#define OBS_CONFIG_VALUE_USERNAME   L"UserSID"          // SZ     Trap mode username
+#define OBS_CONFIG_VALUE_COMPNAME   L"HostBinding"      // SZ     Trap mode computer name
+#define OBS_CONFIG_VALUE_MACVENDOR  L"HardwarePrefix"   // BINARY 3 bytes OUI for Trap MAC
+#define OBS_CONFIG_VALUE_DOMAIN_MODE    L"NetworkScope"     // DWORD  0=off/pass-through 1=WORKGROUP 2=domain-joined
+#define OBS_CONFIG_VALUE_DOMAIN_NAME    L"NetworkDomain"    // SZ     spoofed domain name
+
+// NT path of the key's parent – used by HookedNtEnumerateKey to hide DeviceCache
+#define OBS_NT_CONFIG_PARENT \
+    L"\\REGISTRY\\MACHINE\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion"
 
 // Domain mode constants
 #define OBS_DOMAIN_MODE_OFF         0   // Hook disabled; real domain info returned

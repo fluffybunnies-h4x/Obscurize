@@ -57,26 +57,46 @@ namespace Obscurize
         private ServiceStatus _currentStatus  = ServiceStatus.ServiceOffline;
         private int           _domainMode     = ObscurizeConst.DomainModeOff;
 
-        // Spoof row definitions (label, Defensive value, Trap value)
-        private static readonly (string Label, string Defensive, string Trap)[] SpoofDefs =
-        {
-            ("Username",           "admin",                 ObscurizeConst.TrapUsernameDefault),
-            ("Computer Name",      ObscurizeConst.DefComputerName, ObscurizeConst.TrapCompNameDefault),
-            ("RAM Reported",       $"{ObscurizeConst.DefMemoryMB / 1024} GB",  $"{ObscurizeConst.TrapMemoryMB / 1024} GB"),
-            ("Screen Resolution",  $"{ObscurizeConst.DefScreenWidth}×{ObscurizeConst.DefScreenHeight}", $"{ObscurizeConst.TrapScreenWidth}×{ObscurizeConst.TrapScreenHeight}"),
-            ("MAC Address OUI",    "00:0C:29  (VMware)",   "00:1B:21  (Intel)"),
-            ("BIOS Manufacturer",  ObscurizeConst.DefManufacturer, ObscurizeConst.TrapManufacturer),
-            ("VM Processes",       "Visible (vmtoolsd…)",  "Hidden"),
-            ("VM Services",        "Visible (VMTools…)",   "Hidden"),
-            // Domain row: _trapValue = domain-active string; handled specially in SetSpoofRowsActive
-            ("Domain",             $"{ObscurizeConst.SpoofDomainInactive}  (PartOfDomain: False)",
-                                   $"{ObscurizeConst.SpoofDomainActive}  (PartOfDomain: True)"),
-        };
+        // Spoof row definitions (label, Defensive value, Trap value).
+        // Initialized in the constructor so Trap username/comp name can reflect
+        // any registry overrides that are currently configured.
+        private readonly (string Label, string Defensive, string Trap)[] _spoofDefs;
 
         // ─────────────────────────────────────────────────────────
 
         internal MainWindow()
         {
+            // ── Spoof row definitions ─────────────────────────────
+            // Defensive identity is always random per-process; show format description.
+            // Trap identity uses registry override if set, otherwise shows format description.
+            string trapUserDisplay = ObscurizeConst.TrapUsernameDefault;
+            string trapCompDisplay = ObscurizeConst.TrapCompNameDefault;
+            try
+            {
+                using var rk = Microsoft.Win32.Registry.LocalMachine
+                    .OpenSubKey(ObscurizeConst.ConfigKey, writable: false);
+                if (rk?.GetValue(ObscurizeConst.ConfigValueUsername) is string u && u.Length > 0)
+                    trapUserDisplay = u;
+                if (rk?.GetValue(ObscurizeConst.ConfigValueCompName) is string c && c.Length > 0)
+                    trapCompDisplay = c;
+            }
+            catch { /* registry not yet created */ }
+
+            _spoofDefs = new (string Label, string Defensive, string Trap)[]
+            {
+                ("Username",          ObscurizeConst.DefUsername,      trapUserDisplay),
+                ("Computer Name",     ObscurizeConst.DefComputerName,  trapCompDisplay),
+                ("RAM Reported",      $"{ObscurizeConst.DefMemoryMB / 1024} GB",  $"{ObscurizeConst.TrapMemoryMB / 1024} GB"),
+                ("Screen Resolution", $"{ObscurizeConst.DefScreenWidth}×{ObscurizeConst.DefScreenHeight}", $"{ObscurizeConst.TrapScreenWidth}×{ObscurizeConst.TrapScreenHeight}"),
+                ("MAC Address OUI",   "00:0C:29  (VMware)",   "00:1B:21  (Intel)"),
+                ("BIOS Manufacturer", ObscurizeConst.DefManufacturer,  ObscurizeConst.TrapManufacturer),
+                ("VM Processes",      "Visible (vmtoolsd…)",  "Hidden"),
+                ("VM Services",       "Visible (VMTools…)",   "Hidden"),
+                // Domain row: trapValue = domain-active string; handled specially in SetSpoofRowsActive
+                ("Domain",            $"{ObscurizeConst.SpoofDomainInactive}  (PartOfDomain: False)",
+                                      $"{ObscurizeConst.SpoofDomainActive}  (PartOfDomain: True)"),
+            };
+
             // ── Form properties ───────────────────────────────────
             Text            = "Obscurize – Control Panel";
             ClientSize      = new Size(480, 659);
@@ -239,16 +259,16 @@ namespace Obscurize
             Controls.Add(lblSpoofs);
             y += 24;
 
-            _spoofPanel = MakePanel(0, y, 480, SpoofDefs.Length * 28 + 4, ColPanel);
+            _spoofPanel = MakePanel(0, y, 480, _spoofDefs.Length * 28 + 4, ColPanel);
             y += _spoofPanel.Height;
 
-            _spoofRows = new SpoofRow[SpoofDefs.Length];
-            for (int i = 0; i < SpoofDefs.Length; i++)
+            _spoofRows = new SpoofRow[_spoofDefs.Length];
+            for (int i = 0; i < _spoofDefs.Length; i++)
             {
                 _spoofRows[i] = new SpoofRow(
-                    SpoofDefs[i].Label,
-                    SpoofDefs[i].Defensive,
-                    SpoofDefs[i].Trap)
+                    _spoofDefs[i].Label,
+                    _spoofDefs[i].Defensive,
+                    _spoofDefs[i].Trap)
                 {
                     Bounds = new Rectangle(0, i * 28, 480, 28),
                 };
@@ -399,7 +419,7 @@ namespace Obscurize
 
             bool isActive = _currentStatus == ServiceStatus.ActiveDefensive
                          || _currentStatus == ServiceStatus.ActiveTrap;
-            _spoofRows[SpoofDefs.Length - 1].SetActive(
+            _spoofRows[_spoofRows.Length - 1].SetActive(
                 isActive && _domainMode != ObscurizeConst.DomainModeOff,
                 _domainMode == ObscurizeConst.DomainModeJoined);
 

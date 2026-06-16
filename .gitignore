@@ -33,8 +33,9 @@ ObscurizeService/ObscurizeService/
 **/bin/
 **/obj/
 
-# Output binaries (tracked explicitly if needed, otherwise exclude)
-# output/
+# Agent DLL staging dir - DLLs are build inputs for the service .rc file so the
+# directory is not excluded wholesale, but EXEs must never accumulate here.
+output/*.exe
 
 # User-specific files
 *.user

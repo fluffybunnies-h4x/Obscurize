@@ -46,26 +46,48 @@ function Write-Info($label, $value, $note = "") {
     Write-Host ("  {0,-44} {1}{2}" -f $label, $value, $tag) -ForegroundColor White
 }
 
+# Pattern-check variant for values that are randomised per-process.
+# $friendlyDesc is shown in the Expected column; $pattern is the regex.
+# Always prints the actual value so the random identity is visible.
+function Write-CheckRegex($label, $pattern, $friendlyDesc, $actual, $note = "") {
+    $pass   = $actual -match $pattern
+    $status = if ($pass) { "[PASS]" } else { "[FAIL]" }
+    $color  = if ($pass) { "Green"  } else { "Red"   }
+    Write-Host ("  {0,-6} {1,-38} Expected: {2}" -f $status, $label, $friendlyDesc) -ForegroundColor $color
+    $gotColor = if ($pass) { "DarkGray" } else { "Yellow" }
+    Write-Host ("         {0,-38} Got:      {1}" -f "", $actual) -ForegroundColor $gotColor
+    if (-not $pass) {
+        Write-Host ("         {0,-38} Pattern:  {1}" -f "", $pattern) -ForegroundColor DarkGray
+    }
+}
+
 # ---------------------------------------------------------------------------
 #  Read service config from registry
 # ---------------------------------------------------------------------------
 
-$regPath = "HKLM:\SOFTWARE\ObscurizeConfig"
+$regPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\DeviceCache"
 
 try {
     $cfg = Get-ItemProperty -Path $regPath -EA Stop
 } catch {
-    Write-Host "`n  [ERROR] HKLM:\SOFTWARE\ObscurizeConfig not found." -ForegroundColor Red
+    Write-Host "`n  [ERROR] Registry key not found: $regPath" -ForegroundColor Red
     Write-Host "          Is ObscurizeService installed and running?`n" -ForegroundColor Red
     exit 1
 }
 
-$enabled     = [bool]($cfg.Enabled)
-$mode        = $cfg.Mode          # 1=Defensive  2=Trap
-$domMode     = [int]($cfg.DomainMode)   # 0=Off/pass-through  1=WORKGROUP  2=Joined
-$spoofDomain = if ($cfg.SpoofDomainName) { $cfg.SpoofDomainName } else { "CORP.DEV" }
-$spoofUser   = if ($cfg.SpoofUsername)   { $cfg.SpoofUsername   } else { "jsmith" }           # OBS_TRAP_USERNAME_DEFAULT
-$spoofComp   = if ($cfg.SpoofCompName)   { $cfg.SpoofCompName   } else { "DESKTOP-J8K3M2" }   # OBS_TRAP_COMPNAME_DEFAULT
+$enabled     = [bool]($cfg.DeviceState)
+$mode        = $cfg.CacheLevel        # 1=Defensive  2=Trap
+$domMode     = [int]($cfg.NetworkScope)   # 0=Off/pass-through  1=WORKGROUP  2=Joined
+$spoofDomain    = if ($cfg.NetworkDomain) { $cfg.NetworkDomain } else { "CORP.DEV" }
+# In Trap mode, WriteSessionIdentity() in ServiceMain.c auto-populates UserSID and
+# HostBinding in the registry when Trap mode activates.  Every injected process reads
+# these values and returns the same identity, preventing C2 operators from seeing
+# per-process chaos.  In Defensive mode the service clears these values so the Agent
+# reverts to per-process random identities.
+$hasCustomUser  = ($cfg.PSObject.Properties['UserSID']      -and "$($cfg.UserSID)"      -ne "")
+$hasCustomComp  = ($cfg.PSObject.Properties['HostBinding']  -and "$($cfg.HostBinding)"  -ne "")
+$spoofUser      = if ($hasCustomUser) { $cfg.UserSID      } else { $null }
+$spoofComp      = if ($hasCustomComp) { $cfg.HostBinding  } else { $null }
 
 $modeStr = switch ($mode) { 1 { "DEFENSIVE" } 2 { "TRAP" } default { "UNKNOWN ($mode)" } }
 $defMode = ($mode -eq 1)
@@ -88,6 +110,12 @@ $modeColor = if ($defMode) { "Cyan" } else { "Magenta" }
 Write-Host ("  Active Mode     : {0}" -f $modeStr)      -ForegroundColor $modeColor
 $domColor = switch ($domMode) { 2 { "Green" } 1 { "DarkYellow" } default { "DarkGray" } }
 Write-Host ("  Domain Mode     : {0}" -f $domStr)       -ForegroundColor $domColor
+if (-not $defMode -and ($hasCustomUser -or $hasCustomComp)) {
+    $pinnedUser = if ($hasCustomUser) { $spoofUser } else { "(not set)" }
+    $pinnedComp = if ($hasCustomComp) { $spoofComp } else { "(not set)" }
+    Write-Host ("  Session Identity: {0}  /  {1}" -f $pinnedUser, $pinnedComp) -ForegroundColor Magenta
+    Write-Host "                    (pinned by service - consistent across all injected processes)" -ForegroundColor DarkGray
+}
 
 if (-not $enabled) {
     Write-Host "`n  Obscurize is disabled. Enable it in the GUI and re-run.`n" -ForegroundColor Red
@@ -158,21 +186,178 @@ $sb = New-Object System.Text.StringBuilder 256
 $sz = 256
 [ObsDemo]::GetUserNameW($sb, [ref]$sz) | Out-Null
 $gotUser = $sb.ToString()
-$expUser = if ($defMode) { "admin" } else { $spoofUser }
-Write-Check "GetUserNameW" $expUser $gotUser "HOOK"
 
 $sb2 = New-Object System.Text.StringBuilder 256
 $sz2 = 256
 [ObsDemo]::GetComputerNameExW(1, $sb2, [ref]$sz2) | Out-Null   # 1 = ComputerNameDnsHostname
 $gotComp = $sb2.ToString()
-$expComp = if ($defMode) { "DESKTOP-ANALY5T" } else { $spoofComp }
-Write-Check "GetComputerNameExW" $expComp $gotComp "HOOK"
+
+if ($defMode) {
+    # Defensive: random sandbox identity generated per-process at DLL load time.
+    # Username:  one of admin/user/sandbox/malware/test + 6-char alnum suffix  e.g. admin4Kj9Pq
+    # Comp name: DESKTOP- followed by 7 uppercase consonant-alnum chars         e.g. DESKTOP-B3FK2MN
+    Write-CheckRegex "GetUserNameW" `
+        "^(admin|user|sandbox|malware|test)[a-zA-Z0-9]{6}$" `
+        "sandbox base + 6-char suffix" `
+        $gotUser "HOOK"
+    Write-CheckRegex "GetComputerNameExW" `
+        "^DESKTOP-[A-Z0-9]{7}$" `
+        "DESKTOP-XXXXXXX (7 chars)" `
+        $gotComp "HOOK"
+} else {
+    # Trap: service writes a consistent session identity (firstname.lastname /
+    # XXX-XXXXXX) to UserSID / HostBinding in the registry when Trap mode
+    # activates.  All injected processes read these values and return the same
+    # identity, so the exact-match path below is the normal case.
+    #
+    # The regex fallback only fires during a narrow startup window before
+    # WriteSessionIdentity() has run (extremely unlikely in practice).
+    if ($hasCustomUser) {
+        Write-Info "  Pinned by service" $spoofUser "registry"
+        Write-Check "GetUserNameW" $spoofUser $gotUser "HOOK"
+    } else {
+        Write-CheckRegex "GetUserNameW" `
+            "^[a-z]+\.[a-z]+$" `
+            "firstname.lastname (not yet pinned?)" `
+            $gotUser "HOOK"
+    }
+    if ($hasCustomComp) {
+        Write-Info "  Pinned by service" $spoofComp "registry"
+        Write-Check "GetComputerNameExW" $spoofComp $gotComp "HOOK"
+    } else {
+        Write-CheckRegex "GetComputerNameExW" `
+            "^[A-Z]{3}-[A-Z0-9]{6}$" `
+            "XXX-XXXXXX (not yet pinned?)" `
+            $gotComp "HOOK"
+    }
+}
 
 # ---------------------------------------------------------------------------
-#  SECTION 2 - Memory  [HOOK]
+#  SECTION 2 - Per-Process Identity Showcase  [HOOK]
+#
+#  Each Start-Job spawns a real powershell.exe child process.
+#  ObscurizeService detects each new PID (100 ms poll) and injects the
+#  Agent DLL via CreateRemoteThread.  The job sleeps 500 ms to let
+#  injection land, then calls GetUserNameW / GetComputerNameExW normally.
+#
+#  Defensive: proves every process gets a DIFFERENT random identity.
+#  Trap:      proves every process gets the SAME pinned session identity.
 # ---------------------------------------------------------------------------
 
-Write-Header "2. MEMORY  [HOOK - requires Agent injection]"
+Write-Header "2. PER-PROCESS IDENTITY SHOWCASE  [HOOK - spawns 12 background processes]"
+
+if ($defMode) {
+    Write-Host "  DEFENSIVE MODE: each injected process should report a unique random identity." -ForegroundColor Cyan
+} else {
+    $pinnedStr = if ($hasCustomUser) { "$spoofUser  /  $spoofComp" } else { "(waiting for service to pin)" }
+    Write-Host "  TRAP MODE: every process should report the same pinned identity: $pinnedStr" -ForegroundColor Magenta
+}
+Write-Host ""
+Write-Host "  Spawning 12 background PowerShell processes (staggered 300 ms apart)..." -ForegroundColor DarkGray
+Write-Host ""
+
+# Stagger process creation so the service's serial injection loop keeps up.
+# Each new PID is detected within the 100 ms poll; injecting 12 serially can
+# take 1-2 s total.  With 300 ms between spawns the service stays ahead of the
+# queue and every job's 500 ms in-job sleep is enough.
+$obsJobs = 1..12 | ForEach-Object {
+    $j = Start-Job -ScriptBlock {
+        # Wait for ObscurizeService to detect this PID and inject the Agent DLL.
+        Start-Sleep -Milliseconds 500
+
+        Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+public class ObsIdProbe {
+    [DllImport("advapi32.dll", CharSet=CharSet.Unicode)]
+    public static extern bool GetUserNameW(StringBuilder buf, ref int size);
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode)]
+    public static extern bool GetComputerNameExW(int nameType, StringBuilder buf, ref int size);
+}
+"@ -ErrorAction SilentlyContinue
+
+        $ub = New-Object System.Text.StringBuilder 256; $us = 256
+        [ObsIdProbe]::GetUserNameW($ub, [ref]$us) | Out-Null
+
+        $cb = New-Object System.Text.StringBuilder 256; $cs = 256
+        [ObsIdProbe]::GetComputerNameExW(1, $cb, [ref]$cs) | Out-Null
+
+        [PSCustomObject]@{
+            PID         = $PID
+            ProcessName = (Get-Process -Id $PID).ProcessName
+            Username    = $ub.ToString()
+            ComputerName= $cb.ToString()
+        }
+    }
+    Start-Sleep -Milliseconds 300   # stagger: let the service inject before next process starts
+    $j                              # return job object to pipeline
+}
+
+$null    = $obsJobs | Wait-Job -Timeout 20
+$obsResults = @($obsJobs | Where-Object State -eq 'Completed' | Receive-Job)
+$obsJobs | Remove-Job -Force | Out-Null
+
+$obsSpawned = ($obsJobs | Measure-Object).Count
+Write-Host ("  Received results from {0}/{1} processes." -f $obsResults.Count, $obsSpawned) `
+    -ForegroundColor $(if ($obsResults.Count -eq $obsSpawned) { "Green" } else { "Yellow" })
+if ($obsResults.Count -lt $obsSpawned) {
+    Write-Host "  (timed out processes were not yet injected - try re-running)" -ForegroundColor DarkGray
+}
+Write-Host ""
+
+if ($obsResults.Count -eq 0) {
+    Write-Host "  [WARN] No results returned." -ForegroundColor Yellow
+    Write-Host "         The Agent DLL may not be injecting into new processes yet." -ForegroundColor DarkGray
+    Write-Host "         Try: enable Obscurize in the GUI, then re-run this script." -ForegroundColor DarkGray
+} else {
+    $userPat = "^(admin|user|sandbox|malware|test)[a-zA-Z0-9]{6}$"
+    $compPat = "^DESKTOP-[A-Z0-9]{7}$"
+
+    Write-Host ("  {0,-8} {1,-18} {2,-24} {3}" -f "PID", "Process", "Username", "Computer Name") -ForegroundColor Cyan
+    Write-Host ("  {0,-8} {1,-18} {2,-24} {3}" -f "---", "-------", "--------", "-------------") -ForegroundColor DarkGray
+
+    foreach ($r in $obsResults | Sort-Object PID) {
+        if ($defMode) {
+            $ok = ($r.Username -match $userPat) -and ($r.ComputerName -match $compPat)
+        } elseif ($hasCustomUser -and $hasCustomComp) {
+            $ok = ($r.Username -eq $spoofUser) -and ($r.ComputerName -eq $spoofComp)
+        } else {
+            $ok = ($r.Username -match "^[a-z]+\.[a-z]+$") -and ($r.ComputerName -match "^[A-Z]{3}-[A-Z0-9]{6}$")
+        }
+        $col = if ($ok) { "Green" } else { "Yellow" }
+        Write-Host ("  {0,-8} {1,-18} {2,-24} {3}" -f $r.PID, $r.ProcessName, $r.Username, $r.ComputerName) -ForegroundColor $col
+    }
+
+    Write-Host ""
+
+    if ($defMode) {
+        $uniqU = ($obsResults.Username     | Sort-Object -Unique).Count
+        $uniqC = ($obsResults.ComputerName | Sort-Object -Unique).Count
+        $uCol  = if ($uniqU -eq $obsResults.Count) { "Green" } else { "Yellow" }
+        $cCol  = if ($uniqC -eq $obsResults.Count) { "Green" } else { "Yellow" }
+        Write-Host ("  Unique usernames:      {0}/{1}" -f $uniqU, $obsResults.Count) -ForegroundColor $uCol
+        Write-Host ("  Unique computer names: {0}/{1}" -f $uniqC, $obsResults.Count) -ForegroundColor $cCol
+        Write-Host "  (rare collisions are possible given the small charset - not a defect)" -ForegroundColor DarkGray
+    } else {
+        if ($hasCustomUser -and $hasCustomComp) {
+            $matchU = @($obsResults | Where-Object { $_.Username     -eq $spoofUser }).Count
+            $matchC = @($obsResults | Where-Object { $_.ComputerName -eq $spoofComp }).Count
+            $uCol   = if ($matchU -eq $obsResults.Count) { "Green" } else { "Red" }
+            $cCol   = if ($matchC -eq $obsResults.Count) { "Green" } else { "Red" }
+            Write-Host ("  Matching pinned username:  {0}/{1}  (all same = session consistency OK)" -f $matchU, $obsResults.Count) -ForegroundColor $uCol
+            Write-Host ("  Matching pinned comp name: {0}/{1}  (all same = session consistency OK)" -f $matchC, $obsResults.Count) -ForegroundColor $cCol
+        } else {
+            Write-Host "  Session identity not yet pinned - rerun after service writes UserSID/HostBinding." -ForegroundColor Yellow
+        }
+    }
+}
+
+# ---------------------------------------------------------------------------
+#  SECTION 3 - Memory  [HOOK]  (was section 2 before per-process showcase)
+# ---------------------------------------------------------------------------
+
+Write-Header "3. MEMORY  [HOOK - requires Agent injection]"
 
 $mem = New-Object ObsDemo+MEMORYSTATUSEX
 $mem.dwLength = [System.Runtime.InteropServices.Marshal]::SizeOf($mem)
@@ -187,7 +372,7 @@ Write-Info  "  Reported value" "$ramGb GB  (expected $expStr)"
 #  SECTION 3 - Display Resolution  [HOOK]
 # ---------------------------------------------------------------------------
 
-Write-Header "3. DISPLAY RESOLUTION  [HOOK - requires Agent injection + WMI via profile.ps1]"
+Write-Header "4. DISPLAY RESOLUTION  [HOOK - requires Agent injection + WMI via profile.ps1]"
 
 # Allocate unmanaged memory for DEVMODE (220 bytes), set dmSize, call, read results.
 # dmSize at offset 68 (ushort), dmPelsWidth at 172 (uint), dmPelsHeight at 176 (uint).
@@ -216,7 +401,7 @@ Write-Check "GetSystemMetrics (SM_CXSCREEN/SM_CYSCREEN)" $expRes "$smW x $smH" "
 #  SECTION 4 - Domain Join  [HOOK + WMI]
 # ---------------------------------------------------------------------------
 
-Write-Header "4. DOMAIN JOIN  [HOOK for Win32 callers / WMI via profile.ps1]"
+Write-Header "5. DOMAIN JOIN  [HOOK for Win32 callers / WMI via profile.ps1]"
 
 $nameBuf = [IntPtr]::Zero
 $bufType = 0
@@ -236,7 +421,7 @@ if ($domMode -eq 2) {
     Write-Check "NetGetJoinInformation (name)"       "WORKGROUP"   $joinName  "HOOK"
     Write-Check "NetGetJoinInformation (type)"       "Workgroup"   $joinType  "HOOK"
 } else {
-    Write-Host ("    [PASS-THROUGH]  NetGetJoinInformation  →  $joinName ($joinType)") -ForegroundColor DarkGray
+    Write-Host ("    [PASS-THROUGH]  NetGetJoinInformation  ->  $joinName ($joinType)") -ForegroundColor DarkGray
 }
 
 $cs = Get-WmiObject Win32_ComputerSystem
@@ -254,7 +439,7 @@ if ($domMode -eq 2) {
 #  SECTION 5 - Hardware Identity  [WMI]
 # ---------------------------------------------------------------------------
 
-Write-Header "5. HARDWARE IDENTITY  [WMI - intercepted by profile.ps1]"
+Write-Header "6. HARDWARE IDENTITY  [WMI - intercepted by profile.ps1]"
 
 $expSysMfg  = if ($defMode) { "VMware, Inc."            } else { "Dell Inc."       }
 $expSysProd = if ($defMode) { "VMware Virtual Platform"  } else { "Precision 5560"  }
@@ -290,7 +475,7 @@ Write-Info  "  Reported CPU" $cpu.Name
 #  SECTION 6 - Storage  [WMI]
 # ---------------------------------------------------------------------------
 
-Write-Header "6. STORAGE  [WMI - intercepted by profile.ps1]"
+Write-Header "7. STORAGE  [WMI - intercepted by profile.ps1]"
 
 $disks = @(Get-WmiObject Win32_DiskDrive)
 if ($disks.Count -eq 0) {
@@ -305,7 +490,7 @@ if ($disks.Count -eq 0) {
 #  SECTION 7 - Network Adapter  [WMI name / HOOK for MAC OUI]
 # ---------------------------------------------------------------------------
 
-Write-Header "7. NETWORK ADAPTER  [WMI name via profile.ps1 / MAC OUI via HOOK]"
+Write-Header "8. NETWORK ADAPTER  [WMI name via profile.ps1 / MAC OUI via HOOK]"
 
 $nics = @(Get-WmiObject Win32_NetworkAdapter | Where-Object { $_.PhysicalAdapter -eq $true })
 if ($nics.Count -eq 0) {
@@ -348,7 +533,7 @@ foreach ($mac in $nacMacs) {
 #  SECTION 8 - GPU  [WMI]
 # ---------------------------------------------------------------------------
 
-Write-Header "8. GPU  [WMI - intercepted by profile.ps1]"
+Write-Header "9. GPU  [WMI - intercepted by profile.ps1]"
 
 $gpu    = Get-WmiObject Win32_VideoController | Select-Object -First 1
 $expGpu = if ($defMode) { "VMware SVGA 3D" } else { "Intel(R) Iris(R) Xe Graphics" }
@@ -362,7 +547,7 @@ Write-Check "Win32_VideoController.CurrentVerticalResolution"   $expResH "$($gpu
 #  SECTION 9 - Registry BIOS artefacts  [always visible, no injection needed]
 # ---------------------------------------------------------------------------
 
-Write-Header "9. REGISTRY BIOS ARTEFACTS  [persistent, no injection needed]"
+Write-Header "10. REGISTRY BIOS ARTEFACTS  [persistent, no injection needed]"
 
 $biosRegPath = "HKLM:\HARDWARE\DESCRIPTION\System\BIOS"
 try {
@@ -383,7 +568,7 @@ try {
 #  SECTION 10 - Known gaps
 # ---------------------------------------------------------------------------
 
-Write-Header "10. KNOWN GAPS  [not currently spoofed]"
+Write-Header "11. KNOWN GAPS  [not currently spoofed]"
 
 Write-Host "  CPUID / RDTSC timing - CPU-level VM detection bypasses all Win32/NT hooks." -ForegroundColor Yellow
 Write-Host "    Requires a kernel driver (v2)." -ForegroundColor DarkGray

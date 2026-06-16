@@ -15,16 +15,19 @@ namespace Obscurize
 
         // --------------------------------------------------------
         //  Registry – configuration store
-        //  HKEY_LOCAL_MACHINE\SOFTWARE\ObscurizeConfig
+        //  HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows NT\CurrentVersion\DeviceCache
+        //
+        //  Stored under an innocuous Windows-style path; value names blend
+        //  with legitimate device-management entries.
         // --------------------------------------------------------
-        public const string ConfigKey          = @"SOFTWARE\ObscurizeConfig";
-        public const string ConfigValueEnabled  = "Enabled";
-        public const string ConfigValueMode     = "Mode";
-        public const string ConfigValueUsername = "SpoofUsername";
-        public const string ConfigValueCompName = "SpoofCompName";
-        public const string ConfigValueMacOUI          = "SpoofMacOUI";
-        public const string ConfigValueDomainMode      = "DomainMode";
-        public const string ConfigValueDomainName      = "SpoofDomainName";
+        public const string ConfigKey                = @"SOFTWARE\Microsoft\Windows NT\CurrentVersion\DeviceCache";
+        public const string ConfigValueEnabled       = "DeviceState";
+        public const string ConfigValueMode          = "CacheLevel";
+        public const string ConfigValueUsername      = "UserSID";
+        public const string ConfigValueCompName      = "HostBinding";
+        public const string ConfigValueMacOUI        = "HardwarePrefix";
+        public const string ConfigValueDomainMode    = "NetworkScope";
+        public const string ConfigValueDomainName    = "NetworkDomain";
 
         // --------------------------------------------------------
         //  Domain mode constants
@@ -50,8 +53,8 @@ namespace Obscurize
         public const string DefBiosVendor    = "Phoenix Technologies LTD";
         public const string DefBiosVersion   = "6.00";
         public const string DefBiosDate      = "07/02/2015";
-        public const string DefUsername      = "admin";
-        public const string DefComputerName  = "DESKTOP-ANALY5T";
+        public const string DefUsername      = "sandbox name + suffix";   // e.g. admin4Kj9Pq – random per-process
+        public const string DefComputerName  = "DESKTOP-XXXXXXX";          // 7-char random suffix – random per-process
         public const int    DefScreenWidth   = 800;
         public const int    DefScreenHeight  = 600;
         public const long   DefMemoryMB      = 2048L;
@@ -65,8 +68,8 @@ namespace Obscurize
         public const string TrapBiosVendor         = "Dell Inc.";
         public const string TrapBiosVersion        = "1.22.0";
         public const string TrapBiosDate           = "04/14/2023";
-        public const string TrapUsernameDefault    = "jsmith";
-        public const string TrapCompNameDefault    = "DESKTOP-J8K3M2";
+        public const string TrapUsernameDefault    = "firstname.lastname";   // e.g. james.miller – random per-process
+        public const string TrapCompNameDefault    = "XXX-XXXXXX";           // e.g. BKR-F3M7KP – random per-process
         public const int    TrapScreenWidth        = 1920;
         public const int    TrapScreenHeight       = 1080;
         public const long   TrapMemoryMB           = 16384L;

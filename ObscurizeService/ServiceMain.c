@@ -48,6 +48,125 @@ static SERVICE_STATUS_HANDLE s_statusHandle = NULL;
 static SERVICE_STATUS        s_serviceStatus = { 0 };
 static HANDLE                s_stopEvent     = NULL;
 
+// --------------------------------------------------------
+//  Trap-mode session identity
+//
+//  When entering Trap mode the service generates one consistent
+//  username (firstname.lastname) and computer name (XXX-XXXXXX)
+//  and writes them to the registry as UserSID / HostBinding.
+//  All injected processes read these values, so every process
+//  reports the same identity regardless of injection order or
+//  timing — preventing a C2 operator from seeing inconsistency.
+//
+//  If the operator has already set UserSID / HostBinding
+//  manually (deliberate persona), those values are left alone.
+//  When switching back to Defensive mode the auto-generated
+//  values are deleted so per-process randomness resumes.
+// --------------------------------------------------------
+
+// Character sets must stay in sync with Config.c / GenerateRandomIdentities()
+static const LPCWSTR s_FirstNames[] = {
+    L"james", L"john", L"robert", L"michael", L"william",
+    L"david", L"richard", L"joseph", L"thomas", L"charles",
+    L"mary", L"patricia", L"jennifer", L"linda", L"barbara",
+    L"sarah", L"jessica", L"karen", L"lisa", L"nancy", NULL
+};
+static const LPCWSTR s_LastNames[] = {
+    L"smith", L"jones", L"williams", L"brown", L"taylor",
+    L"davies", L"evans", L"thomas", L"roberts", L"johnson",
+    L"wilson", L"walker", L"wright", L"thompson", L"white", NULL
+};
+// Uppercase consonants only – no vowels (prevents accidental words)
+static const WCHAR s_Alpha[]    = L"ABCDEFGHJKLMNPQRSTVWXYZ";
+// Consonant-heavy alphanumeric for the 6-char suffix
+static const WCHAR s_ConsAlnum[] = L"BCDFGHJKLMNPQRSTVWXZ2345679";
+
+static DWORD s_sessionRng = 0;
+
+static DWORD SessionRand(VOID)
+{
+    if (s_sessionRng == 0)
+        s_sessionRng = GetCurrentProcessId() ^ GetTickCount();
+    s_sessionRng ^= s_sessionRng << 13;
+    s_sessionRng ^= s_sessionRng >> 17;
+    s_sessionRng ^= s_sessionRng << 5;
+    return s_sessionRng;
+}
+
+// Write a consistent Trap-mode identity to the registry.
+// Skips each value individually if it is already manually set.
+static VOID WriteSessionIdentity(VOID)
+{
+    HKEY key = NULL;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, OBS_CONFIG_KEY, 0,
+                      KEY_QUERY_VALUE | KEY_SET_VALUE | KEY_WOW64_64KEY,
+                      &key) != ERROR_SUCCESS)
+        return;
+
+    DWORD type, size;
+
+    // Username – generate only if not already set
+    size = 0;
+    BOOL hasUser = (RegQueryValueExW(key, OBS_CONFIG_VALUE_USERNAME, NULL,
+                                     &type, NULL, &size) == ERROR_SUCCESS
+                    && type == REG_SZ && size > sizeof(WCHAR));
+    if (!hasUser)
+    {
+        DWORD nFirst = 0, nLast = 0;
+        while (s_FirstNames[nFirst]) nFirst++;
+        while (s_LastNames[nLast])  nLast++;
+
+        WCHAR username[64] = { 0 };
+        StringCchPrintfW(username, 64, L"%s.%s",
+                         s_FirstNames[SessionRand() % nFirst],
+                         s_LastNames [SessionRand() % nLast]);
+        DWORD len = (DWORD)((wcslen(username) + 1) * sizeof(WCHAR));
+        RegSetValueExW(key, OBS_CONFIG_VALUE_USERNAME, 0, REG_SZ,
+                       (LPBYTE)username, len);
+    }
+
+    // Computer name – generate only if not already set
+    size = 0;
+    BOOL hasComp = (RegQueryValueExW(key, OBS_CONFIG_VALUE_COMPNAME, NULL,
+                                     &type, NULL, &size) == ERROR_SUCCESS
+                    && type == REG_SZ && size > sizeof(WCHAR));
+    if (!hasComp)
+    {
+        DWORD alphaLen    = (DWORD)(ARRAYSIZE(s_Alpha)    - 1);
+        DWORD consAlnumLen = (DWORD)(ARRAYSIZE(s_ConsAlnum) - 1);
+
+        WCHAR compname[16] = { 0 };
+        compname[0] = s_Alpha[SessionRand() % alphaLen];
+        compname[1] = s_Alpha[SessionRand() % alphaLen];
+        compname[2] = s_Alpha[SessionRand() % alphaLen];
+        compname[3] = L'-';
+        for (int i = 0; i < 6; i++)
+            compname[4 + i] = s_ConsAlnum[SessionRand() % consAlnumLen];
+        compname[10] = L'\0';
+
+        DWORD len = (DWORD)((wcslen(compname) + 1) * sizeof(WCHAR));
+        RegSetValueExW(key, OBS_CONFIG_VALUE_COMPNAME, 0, REG_SZ,
+                       (LPBYTE)compname, len);
+    }
+
+    RegCloseKey(key);
+}
+
+// Remove auto-generated session identity so Defensive mode uses
+// per-process random values again.  Manual overrides are also
+// cleared – the operator must re-enter them when switching back.
+static VOID ClearSessionIdentity(VOID)
+{
+    HKEY key = NULL;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, OBS_CONFIG_KEY, 0,
+                      KEY_SET_VALUE | KEY_WOW64_64KEY, &key) != ERROR_SUCCESS)
+        return;
+
+    RegDeleteValueW(key, OBS_CONFIG_VALUE_USERNAME);
+    RegDeleteValueW(key, OBS_CONFIG_VALUE_COMPNAME);
+    RegCloseKey(key);
+}
+
 static HANDLE s_newProcessThread  = NULL;
 static HANDLE s_controlPipeThread = NULL;
 
@@ -218,6 +337,13 @@ VOID ObsControlCallback(DWORD controlCode, HANDLE pipe)
 
             // Swap registry artefacts to match the new mode.
             ApplyModeArtefacts(newMode);
+
+            // Maintain a consistent session identity in Trap mode so every
+            // injected process reports the same username and computer name.
+            if (newMode == OBS_MODE_TRAP)
+                WriteSessionIdentity();
+            else
+                ClearSessionIdentity();
             break;
         }
 
@@ -359,8 +485,14 @@ BOOL InitializeObscurizeService(VOID)
     // Ensure config registry key exists and is writable by admins.
     if (!EnsureConfigKey()) return FALSE;
 
+    // In Trap mode, pin a consistent session identity so all injected
+    // processes report the same username / computer name.
+    DWORD startupMode = ReadCurrentMode();
+    if (startupMode == OBS_MODE_TRAP)
+        WriteSessionIdentity();
+
     // Apply artefacts for the current configured mode.
-    ApplyModeArtefacts(ReadCurrentMode());
+    ApplyModeArtefacts(startupMode);
 
     // Inject Agent into every currently-running process.
     InjectAgentIntoAllProcesses();

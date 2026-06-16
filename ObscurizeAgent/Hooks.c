@@ -662,10 +662,28 @@ static NTSTATUS NTAPI HookedNtQueryValueKey(
 
 // ------------------------------------------------------------
 //  NtEnumerateKey / NtQueryKey
-//  Trap mode: suppress VM-vendor subkeys when SOFTWARE is
-//  enumerated (hides VMware, Inc. and Oracle/VirtualBox keys).
+//
+//  Two filtering behaviours, both active whenever Obscurize is
+//  enabled (not just in Trap mode):
+//
+//  1. OBS_NT_CONFIG_PARENT (\...\CurrentVersion)
+//     Always hide the "DeviceCache" config key so a threat actor
+//     enumerating CurrentVersion subkeys never sees it.
+//
+//  2. \REGISTRY\MACHINE\SOFTWARE  (Trap mode only)
+//     Suppress VM-vendor subkeys (VMware, Inc. / Oracle / VBOX)
+//     so the registry looks like bare-metal.
+//
 //  Uses the same TLS-cache O(N) pattern from r77.
 // ------------------------------------------------------------
+
+// Returns TRUE if `name` is the Obscurize config subkey that
+// should always be hidden from enumeration.
+static BOOL IsObscurizeConfigKey(LPCWSTR name)
+{
+    return name && _wcsicmp(name, L"DeviceCache") == 0;
+}
+
 static NTSTATUS NTAPI HookedNtEnumerateKey(
     HANDLE                  Key,
     ULONG                   Index,
@@ -674,7 +692,7 @@ static NTSTATUS NTAPI HookedNtEnumerateKey(
     ULONG                   KeyInformationLength,
     PULONG                  ResultLength)
 {
-    if (!ObsIsEnabled() || ObsGetMode() != OBS_MODE_TRAP)
+    if (!ObsIsEnabled())
         return OriginalNtEnumerateKey(Key, Index, KeyInformationClass,
                                       KeyInformation, KeyInformationLength,
                                       ResultLength);
@@ -685,26 +703,30 @@ static NTSTATUS NTAPI HookedNtEnumerateKey(
                                       KeyInformation, KeyInformationLength,
                                       ResultLength);
 
-    // VM vendor keys (VMware, Inc. / Oracle / VBOX) are direct children of
-    // HKLM\SOFTWARE only.  Applying the filter to any other key causes
-    // STATUS_NO_MORE_ENTRIES to be returned unexpectedly during PowerShell /
-    // CLR / .NET initialization, producing "No more data is available." errors
-    // and preventing shell startup.  Pass through all other keys immediately.
+    // Determine which filters apply for this parent key.
+    // Applying filters to any other key causes STATUS_NO_MORE_ENTRIES
+    // during CLR/.NET init, breaking shell startup.
     WCHAR keyPath[512] = { 0 };
-    if (!GetRegistryKeyNameLocal(Key, keyPath, 512) ||
-        _wcsicmp(keyPath, L"\\REGISTRY\\MACHINE\\SOFTWARE") != 0)
-    {
+    if (!GetRegistryKeyNameLocal(Key, keyPath, 512))
         return OriginalNtEnumerateKey(Key, Index, KeyInformationClass,
                                       KeyInformation, KeyInformationLength,
                                       ResultLength);
-    }
+
+    BOOL filterVmKeys    = (ObsGetMode() == OBS_MODE_TRAP &&
+                             _wcsicmp(keyPath, L"\\REGISTRY\\MACHINE\\SOFTWARE") == 0);
+    BOOL filterConfigKey = (_wcsicmp(keyPath, OBS_NT_CONFIG_PARENT) == 0);
+
+    if (!filterVmKeys && !filterConfigKey)
+        return OriginalNtEnumerateKey(Key, Index, KeyInformationClass,
+                                      KeyInformation, KeyInformationLength,
+                                      ResultLength);
 
     // Retrieve TLS cache for O(N) sequential enumeration.
     // Cast via ULONG_PTR to suppress C4311 pointer-truncation warning.
-    HANDLE cacheKey            = (HANDLE)                    TlsGetValue(TlsEnumKeyCacheKey);
-    ULONG  cacheIndex          = (ULONG)(ULONG_PTR)          TlsGetValue(TlsEnumKeyCacheIndex);
-    ULONG  cacheI              = (ULONG)(ULONG_PTR)          TlsGetValue(TlsEnumKeyCacheI);
-    ULONG  cacheCorrectedIndex = (ULONG)(ULONG_PTR)          TlsGetValue(TlsEnumKeyCacheCorrectedIndex);
+    HANDLE cacheKey            = (HANDLE)           TlsGetValue(TlsEnumKeyCacheKey);
+    ULONG  cacheIndex          = (ULONG)(ULONG_PTR) TlsGetValue(TlsEnumKeyCacheIndex);
+    ULONG  cacheI              = (ULONG)(ULONG_PTR) TlsGetValue(TlsEnumKeyCacheI);
+    ULONG  cacheCorrectedIndex = (ULONG)(ULONG_PTR) TlsGetValue(TlsEnumKeyCacheCorrectedIndex);
 
     ULONG i = 0, correctedIndex = 0;
     if (cacheKey == Key && cacheIndex == Index - 1)
@@ -729,17 +751,18 @@ static NTSTATUS NTAPI HookedNtEnumerateKey(
         // Null-terminate the name
         basic->Name[basic->NameLength / sizeof(WCHAR)] = L'\0';
 
-        if (!IsVmRegistryVendorKey(basic->Name))
-        {
-            i++;  // Advance logical index only for non-hidden keys
-        }
+        BOOL hidden = (filterVmKeys    && IsVmRegistryVendorKey(basic->Name)) ||
+                      (filterConfigKey && IsObscurizeConfigKey(basic->Name));
+
+        if (!hidden)
+            i++;  // Advance logical index only for visible keys
     }
 
     // correctedIndex now points to the actual raw entry matching logical Index.
     // Update TLS cache.
     TlsSetValue(TlsEnumKeyCacheKey,            Key);
     TlsSetValue(TlsEnumKeyCacheIndex,          (LPVOID)(ULONG_PTR)Index);
-    TlsSetValue(TlsEnumKeyCacheI,              (LPVOID)(ULONG_PTR)i);   // Save i, not i-1
+    TlsSetValue(TlsEnumKeyCacheI,              (LPVOID)(ULONG_PTR)i);
     TlsSetValue(TlsEnumKeyCacheCorrectedIndex, (LPVOID)(ULONG_PTR)(correctedIndex - 1));
 
     return OriginalNtEnumerateKey(Key, correctedIndex - 1, KeyInformationClass,
@@ -756,43 +779,63 @@ static NTSTATUS NTAPI HookedNtQueryKey(
     NTSTATUS status = OriginalNtQueryKey(Key, KeyInformationClass,
                                          KeyInformation, Length, ResultLength);
 
-    if (!NT_SUCCESS(status) || !ObsIsEnabled() || ObsGetMode() != OBS_MODE_TRAP)
+    if (!NT_SUCCESS(status) || !ObsIsEnabled())
         return status;
 
     if (KeyInformationClass != KeyFullInformation &&
         KeyInformationClass != KeyCachedInformation)
         return status;
 
-    // Only correct the SubKeys count for HKLM\SOFTWARE — the only key where
-    // VM vendor subkeys exist as direct children.
     WCHAR keyPath[512] = { 0 };
-    if (!GetRegistryKeyNameLocal(Key, keyPath, 512) ||
-        _wcsicmp(keyPath, L"\\REGISTRY\\MACHINE\\SOFTWARE") != 0)
+    if (!GetRegistryKeyNameLocal(Key, keyPath, 512))
         return status;
 
-    // Count how many subkeys are VM vendor keys so we can correct the count.
+    ULONG hiddenSubKeys = 0;
     BYTE  buffer[1024];
     PNT_KEY_BASIC_INFORMATION basic = (PNT_KEY_BASIC_INFORMATION)buffer;
-    ULONG hiddenSubKeys = 0;
 
-    for (ULONG idx = 0; ; idx++)
+    if (ObsGetMode() == OBS_MODE_TRAP &&
+        _wcsicmp(keyPath, L"\\REGISTRY\\MACHINE\\SOFTWARE") == 0)
     {
-        ULONG dummy;
-        if (!NT_SUCCESS(OriginalNtEnumerateKey(Key, idx, KeyBasicInformation,
-                                               basic, sizeof(buffer), &dummy)))
-            break;
-
-        basic->Name[basic->NameLength / sizeof(WCHAR)] = L'\0';
-        if (IsVmRegistryVendorKey(basic->Name))
-            hiddenSubKeys++;
+        // Count VM vendor subkeys to subtract from SOFTWARE's SubKeys count.
+        for (ULONG idx = 0; ; idx++)
+        {
+            ULONG dummy;
+            if (!NT_SUCCESS(OriginalNtEnumerateKey(Key, idx, KeyBasicInformation,
+                                                   basic, sizeof(buffer), &dummy)))
+                break;
+            basic->Name[basic->NameLength / sizeof(WCHAR)] = L'\0';
+            if (IsVmRegistryVendorKey(basic->Name))
+                hiddenSubKeys++;
+        }
+    }
+    else if (_wcsicmp(keyPath, OBS_NT_CONFIG_PARENT) == 0)
+    {
+        // Count DeviceCache to subtract from CurrentVersion's SubKeys count.
+        for (ULONG idx = 0; ; idx++)
+        {
+            ULONG dummy;
+            if (!NT_SUCCESS(OriginalNtEnumerateKey(Key, idx, KeyBasicInformation,
+                                                   basic, sizeof(buffer), &dummy)))
+                break;
+            basic->Name[basic->NameLength / sizeof(WCHAR)] = L'\0';
+            if (IsObscurizeConfigKey(basic->Name))
+                hiddenSubKeys++;
+        }
     }
 
     if (hiddenSubKeys == 0) return status;
 
     if (KeyInformationClass == KeyFullInformation)
-        ((PNT_KEY_FULL_INFORMATION)KeyInformation)->SubKeys -= hiddenSubKeys;
+    {
+        PNT_KEY_FULL_INFORMATION info = (PNT_KEY_FULL_INFORMATION)KeyInformation;
+        if (info->SubKeys >= hiddenSubKeys) info->SubKeys -= hiddenSubKeys;
+    }
     else
-        ((PNT_KEY_CACHED_INFORMATION)KeyInformation)->SubKeys -= hiddenSubKeys;
+    {
+        PNT_KEY_CACHED_INFORMATION info = (PNT_KEY_CACHED_INFORMATION)KeyInformation;
+        if (info->SubKeys >= hiddenSubKeys) info->SubKeys -= hiddenSubKeys;
+    }
 
     return status;
 }
