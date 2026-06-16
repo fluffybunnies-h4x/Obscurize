@@ -1,4 +1,4 @@
-# Visual Studio IDE state – not source code
+# Visual Studio IDE state - not source code
 .vs/
 
 # Build outputs
@@ -13,11 +13,21 @@
 *.res
 *.cache
 
-# MSBuild intermediate directories
+# Exception: Detours pre-built static libs are linker dependencies, not generated artifacts.
+# These must be tracked explicitly because the *.lib rule above would otherwise exclude them.
+# The **/x64/ and **/x86/ rules below are scoped to project intermediate dirs only (not SlnBin)
+# so that this exception does not fight directory-level exclusions.
+!r77-rootkit/r77-rootkit-master/SlnBin/x64/detours.lib
+!r77-rootkit/r77-rootkit-master/SlnBin/x86/detours.lib
+
+# MSBuild intermediate directories - scoped to project folders to avoid matching SlnBin
 **/Release/
 **/Debug/
-**/x64/
-**/x86/
+ObscurizeAgent/x64/
+ObscurizeAgent/x86/
+ObscurizeAgent/Obscuriz*/
+ObscurizeService/x64/
+ObscurizeService/ObscurizeService/
 
 # .NET build output
 **/bin/
