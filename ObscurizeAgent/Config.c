@@ -13,6 +13,114 @@ static HANDLE  s_configThread  = NULL;
 static POBS_CONFIG volatile s_config = NULL;
 static CRITICAL_SECTION s_configLock;
 
+// Per-process random identities, generated once at DLL load.
+//   Defensive values mimic known sandbox environments → malware self-terminates.
+//   Trap values mimic real corporate workstations → malware executes fully.
+// Each injected process gets unique values so Obscurize itself has no fixed string
+// signature that malware authors can hard-code as a detection bypass.
+static WCHAR s_randomDefUsername[64];
+static WCHAR s_randomDefComputerName[MAX_COMPUTERNAME_LENGTH + 1];
+static WCHAR s_randomTrapUsername[64];
+static WCHAR s_randomTrapComputerName[MAX_COMPUTERNAME_LENGTH + 1];
+static DWORD s_rngState;
+
+static DWORD SimpleRand(VOID)
+{
+    // Xorshift32 – fast, no CRT dependency
+    s_rngState ^= s_rngState << 13;
+    s_rngState ^= s_rngState >> 17;
+    s_rngState ^= s_rngState << 5;
+    return s_rngState;
+}
+
+static VOID GenerateRandomIdentities(VOID)
+{
+    // Seed with PID XOR tick so concurrent injections produce different values
+    s_rngState = GetCurrentProcessId() ^ GetTickCount();
+    if (s_rngState == 0) s_rngState = 0xAB3CF917;
+
+    // Consonant-heavy uppercase alphanumeric for computer name fields;
+    // avoids vowels to prevent accidental word formation.
+    static const WCHAR kConsAlnum[] = L"BCDFGHJKLMNPQRSTVWXZ2345679";
+    DWORD consAlnumLen = (DWORD)(ARRAYSIZE(kConsAlnum) - 1);
+
+    // ----------------------------------------------------------------
+    //  Defensive mode — look like a well-known sandbox system
+    // ----------------------------------------------------------------
+
+    // Base names seen in public sandboxes (Any.run, Joe, Cuckoo, etc.)
+    static const LPCWSTR kSandboxNames[] = {
+        L"admin", L"user", L"sandbox", L"malware", L"test", NULL
+    };
+    // Mixed-case alphanumeric suffix pool; avoids confusable chars (0 1 l o I)
+    static const WCHAR kMixed[] =
+        L"abcdefghjkmnpqrstvwxyzABCDEFGHJKMNPQRSTVWXYZ23456789";
+    DWORD mixedLen = (DWORD)(ARRAYSIZE(kMixed) - 1);
+
+    DWORD sandboxCount = 0;
+    while (kSandboxNames[sandboxCount]) sandboxCount++;
+    LPCWSTR sandboxBase = kSandboxNames[SimpleRand() % sandboxCount];
+
+    // Append 6 mixed-case alphanumeric chars: "admin4Kj9Pq", "malwareXz7Wm2"
+    // Malware using contains/startsWith still detects the sandbox keyword;
+    // the suffix prevents Obscurize from having a fixed, signable output.
+    WCHAR sandboxSuffix[7] = { 0 };
+    for (int i = 0; i < 6; i++)
+        sandboxSuffix[i] = kMixed[SimpleRand() % mixedLen];
+    sandboxSuffix[6] = L'\0';
+    StringCchPrintfW(s_randomDefUsername, 64, L"%s%s", sandboxBase, sandboxSuffix);
+
+    // DESKTOP-XXXXXXX: the dominant naming pattern in public sandbox systems
+    // AND the Windows 10/11 default — both trigger sandbox heuristics in malware.
+    WCHAR desktopSuffix[8] = { 0 };
+    for (int i = 0; i < 7; i++)
+        desktopSuffix[i] = kConsAlnum[SimpleRand() % consAlnumLen];
+    desktopSuffix[7] = L'\0';
+    StringCchPrintfW(s_randomDefComputerName, MAX_COMPUTERNAME_LENGTH + 1,
+                     L"DESKTOP-%s", desktopSuffix);
+
+    // ----------------------------------------------------------------
+    //  Trap mode — look like a real corporate workstation
+    // ----------------------------------------------------------------
+
+    static const LPCWSTR kFirstNames[] = {
+        L"james", L"john", L"robert", L"michael", L"william",
+        L"david", L"richard", L"joseph", L"thomas", L"charles",
+        L"mary", L"patricia", L"jennifer", L"linda", L"barbara",
+        L"sarah", L"jessica", L"karen", L"lisa", L"nancy", NULL
+    };
+    static const LPCWSTR kLastNames[] = {
+        L"smith", L"jones", L"williams", L"brown", L"taylor",
+        L"davies", L"evans", L"thomas", L"roberts", L"johnson",
+        L"wilson", L"walker", L"wright", L"thompson", L"white", NULL
+    };
+    // Uppercase alpha only for the 3-letter org prefix
+    static const WCHAR kAlpha[] = L"ABCDEFGHJKLMNPQRSTVWXYZ";
+    DWORD alphaLen = (DWORD)(ARRAYSIZE(kAlpha) - 1);
+
+    DWORD nameCount = 0, lastCount = 0;
+    while (kFirstNames[nameCount]) nameCount++;
+    while (kLastNames[lastCount]) lastCount++;
+
+    LPCWSTR first = kFirstNames[SimpleRand() % nameCount];
+    LPCWSTR last  = kLastNames[SimpleRand() % lastCount];
+    StringCchPrintfW(s_randomTrapUsername, 64, L"%s.%s", first, last);
+
+    // XXX-XXXXXX: 3-letter org prefix + 6 consonant-alnum, e.g. "WKS-4MBF7N"
+    // Matches common corporate AD naming conventions; clearly not a sandbox name.
+    WCHAR orgPrefix[4] = { 0 };
+    for (int i = 0; i < 3; i++)
+        orgPrefix[i] = kAlpha[SimpleRand() % alphaLen];
+    orgPrefix[3] = L'\0';
+
+    WCHAR corpSuffix[7] = { 0 };
+    for (int i = 0; i < 6; i++)
+        corpSuffix[i] = kConsAlnum[SimpleRand() % consAlnumLen];
+    corpSuffix[6] = L'\0';
+    StringCchPrintfW(s_randomTrapComputerName, MAX_COMPUTERNAME_LENGTH + 1,
+                     L"%s-%s", orgPrefix, corpSuffix);
+}
+
 // ------------------------------------------------------------
 //  Internal helpers
 // ------------------------------------------------------------
@@ -25,8 +133,8 @@ static POBS_CONFIG ReadConfigFromRegistry(VOID)
     // Safe defaults – disabled, Defensive mode
     cfg->Enabled = FALSE;
     cfg->Mode    = OBS_MODE_DEFENSIVE;
-    StringCchCopyW(cfg->SpoofUsername,     64,                          OBS_TRAP_USERNAME_DEFAULT);
-    StringCchCopyW(cfg->SpoofComputerName, MAX_COMPUTERNAME_LENGTH + 1, OBS_TRAP_COMPNAME_DEFAULT);
+    cfg->HasCustomUsername     = FALSE;
+    cfg->HasCustomComputerName = FALSE;
     static const BYTE trapOUI[] = OBS_TRAP_MAC_OUI;
     CopyMemory(cfg->SpoofMacOUI, trapOUI, 3);
     cfg->CustomMacOUI = FALSE;
@@ -58,15 +166,23 @@ static POBS_CONFIG ReadConfigFromRegistry(VOID)
             cfg->Mode = value;
     }
 
-    // Trap-mode username override
+    // Trap-mode username override (empty registry value → fall back to per-process random)
     size = sizeof(cfg->SpoofUsername) - sizeof(WCHAR);
-    RegQueryValueExW(key, OBS_CONFIG_VALUE_USERNAME, NULL, &type,
-                     (LPBYTE)cfg->SpoofUsername, &size);
+    if (RegQueryValueExW(key, OBS_CONFIG_VALUE_USERNAME, NULL, &type,
+                         (LPBYTE)cfg->SpoofUsername, &size) == ERROR_SUCCESS
+        && type == REG_SZ && size > sizeof(WCHAR))
+    {
+        cfg->HasCustomUsername = TRUE;
+    }
 
-    // Trap-mode computer name override
+    // Trap-mode computer name override (empty registry value → fall back to per-process random)
     size = sizeof(cfg->SpoofComputerName) - sizeof(WCHAR);
-    RegQueryValueExW(key, OBS_CONFIG_VALUE_COMPNAME, NULL, &type,
-                     (LPBYTE)cfg->SpoofComputerName, &size);
+    if (RegQueryValueExW(key, OBS_CONFIG_VALUE_COMPNAME, NULL, &type,
+                         (LPBYTE)cfg->SpoofComputerName, &size) == ERROR_SUCCESS
+        && type == REG_SZ && size > sizeof(WCHAR))
+    {
+        cfg->HasCustomComputerName = TRUE;
+    }
 
     // Trap-mode MAC OUI override (3 bytes stored as REG_BINARY)
     BYTE ouiBuf[3];
@@ -128,6 +244,7 @@ static DWORD WINAPI ConfigUpdateThread(LPVOID param)
 
 VOID InitializeObsConfig(VOID)
 {
+    GenerateRandomIdentities();
     InitializeCriticalSection(&s_configLock);
     s_configThread = CreateThread(NULL, 0, ConfigUpdateThread, NULL, 0, NULL);
 }
@@ -188,13 +305,16 @@ VOID ObsGetSpoofUsername(PWCHAR buf, DWORD bufCch)
     if (cfg)
     {
         if (cfg->Mode == OBS_MODE_DEFENSIVE)
-            StringCchCopyW(buf, bufCch, OBS_DEF_USERNAME);
-        else
+            StringCchCopyW(buf, bufCch, s_randomDefUsername);
+        else if (cfg->HasCustomUsername)
             StringCchCopyW(buf, bufCch, cfg->SpoofUsername);
+        else
+            StringCchCopyW(buf, bufCch, s_randomTrapUsername);
     }
     else
     {
-        StringCchCopyW(buf, bufCch, OBS_DEF_USERNAME);
+        // s_config not yet ready (pre-init window); use defensive random as safe default
+        StringCchCopyW(buf, bufCch, s_randomDefUsername);
     }
     LeaveCriticalSection(&s_configLock);
 }
@@ -206,13 +326,16 @@ VOID ObsGetSpoofComputerName(PWCHAR buf, DWORD bufCch)
     if (cfg)
     {
         if (cfg->Mode == OBS_MODE_DEFENSIVE)
-            StringCchCopyW(buf, bufCch, OBS_DEF_COMPUTERNAME);
-        else
+            StringCchCopyW(buf, bufCch, s_randomDefComputerName);
+        else if (cfg->HasCustomComputerName)
             StringCchCopyW(buf, bufCch, cfg->SpoofComputerName);
+        else
+            StringCchCopyW(buf, bufCch, s_randomTrapComputerName);
     }
     else
     {
-        StringCchCopyW(buf, bufCch, OBS_DEF_COMPUTERNAME);
+        // s_config not yet ready (pre-init window); use defensive random as safe default
+        StringCchCopyW(buf, bufCch, s_randomDefComputerName);
     }
     LeaveCriticalSection(&s_configLock);
 }

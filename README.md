@@ -95,8 +95,8 @@ Obscurize exploits this behaviour in two directions:
 
 | Check intercepted | Method | Spoofed value |
 |---|---|---|
-| `GetUserNameW/A` | API hook | `admin` |
-| `GetComputerNameExW/A` | API hook | `DESKTOP-ANALY5T` |
+| `GetUserNameW/A` | API hook | Random sandbox username — base picked from `{admin, user, sandbox, malware, test}` with a 6-char mixed-case alphanumeric suffix (e.g. `admin4Kj9Pq`, `malwareXz7Wm2`). Unique per injected process. |
+| `GetComputerNameExW/A` | API hook | Random `DESKTOP-XXXXXXX` — the dominant naming pattern in public sandbox systems (Any.run, Joe Sandbox, Cuckoo) and the Windows 10/11 consumer default. 7-char consonant-alphanumeric suffix. Unique per injected process. |
 | `GlobalMemoryStatusEx` | API hook | 2 048 MB physical RAM |
 | `EnumDisplaySettingsW` | API hook | 800 × 600 resolution |
 | `GetAdaptersAddresses` / `GetAdaptersInfo` | API hook | MAC OUI `00:0C:29` (VMware) |
@@ -116,8 +116,8 @@ Obscurize exploits this behaviour in two directions:
 
 | Check intercepted | Method | Spoofed value |
 |---|---|---|
-| `GetUserNameW/A` | API hook | Config-defined username (default: `jsmith`) |
-| `GetComputerNameExW/A` | API hook | Config-defined computer name (default: `DESKTOP-J8K3M2`) |
+| `GetUserNameW/A` | API hook | Random corporate username in `firstname.lastname` format (e.g. `john.smith`, `sarah.johnson`). Unique per injected process. Registry value `SpoofUsername` overrides if set. |
+| `GetComputerNameExW/A` | API hook | Random corporate computer name in `XXX-XXXXXX` format — 3-letter org prefix + 6 consonant-alphanumeric chars (e.g. `WKS-4MBF7N`, `GHJ-B7DFKP`). Matches common AD naming conventions; explicitly avoids the `DESKTOP-` prefix that malware now flags as a sandbox indicator. Unique per injected process. Registry value `SpoofCompName` overrides if set. |
 | `GlobalMemoryStatusEx` | API hook | 16 384 MB physical RAM |
 | `EnumDisplaySettingsW` | API hook | 1920 × 1080 resolution |
 | `GetAdaptersAddresses` / `GetAdaptersInfo` | API hook | MAC OUI `00:1B:21` (Intel) |
@@ -236,10 +236,10 @@ is `systeminfo.exe` or `wmic.exe`.
 
 | Hook | DLL | Defensive | Trap |
 |---|---|---|---|
-| `GetUserNameW` | advapi32 | Returns `admin` | Returns config username |
-| `GetUserNameA` | advapi32 | Returns `admin` | Returns config username |
-| `GetComputerNameExW` | kernel32 | Returns `DESKTOP-ANALY5T` | Returns config computer name |
-| `GetComputerNameExA` | kernel32 | Returns `DESKTOP-ANALY5T` | Returns config computer name |
+| `GetUserNameW` | advapi32 | Random sandbox username (e.g. `sandbox3Rp8Kn`) | Random `firstname.lastname` (e.g. `john.smith`) or registry override |
+| `GetUserNameA` | advapi32 | Random sandbox username (e.g. `sandbox3Rp8Kn`) | Random `firstname.lastname` (e.g. `john.smith`) or registry override |
+| `GetComputerNameExW` | kernel32 | Random `DESKTOP-XXXXXXX` (sandbox/consumer pattern) | Random `XXX-XXXXXX` corporate name (e.g. `WKS-4MBF7N`) or registry override |
+| `GetComputerNameExA` | kernel32 | Random `DESKTOP-XXXXXXX` (sandbox/consumer pattern) | Random `XXX-XXXXXX` corporate name (e.g. `WKS-4MBF7N`) or registry override |
 | `GlobalMemoryStatusEx` | kernel32 | Reports 2 048 MB RAM | Reports 16 384 MB RAM |
 | `EnumDisplaySettingsW` | user32 | Reports 800×600 | Reports 1920×1080 |
 | `GetSystemMetrics` | user32 | Reports 800×600 (SM_CXSCREEN/SM_CYSCREEN) | Reports 1920×1080 |
@@ -327,6 +327,29 @@ active in both Defensive and Trap modes and is controlled by a separate toggle.
 This reflects the real-world threat pattern: domain-join checks (as seen in
 FAUX ELEVATE) are a distinct pre-execution gate from VM-detection checks and
 must be addressable independently.
+
+**Per-process identity randomisation** — Username and computer name values are
+generated once per DLL load from an xorshift32 RNG seeded with
+`GetCurrentProcessId() ^ GetTickCount()`, so every injected process sees a
+different identity. This prevents malware authors from hard-coding a static
+signature for Obscurize (e.g. `if username == "admin" AND computername ==
+"DESKTOP-ANALY5T" → Obscurize detected → run anyway`).
+
+In Defensive mode the sandbox base names (`admin`, `user`, `sandbox`, `malware`,
+`test`) are preserved because they are the actual detection triggers; only a
+6-character mixed-case suffix is appended to break per-tool signatures while
+keeping the keyword visible to malware using `contains` or `startsWith` checks.
+The `DESKTOP-` prefix is retained for the same reason — it is both the Windows
+consumer default and the dominant naming convention in public sandboxes.
+
+In Trap mode, `DESKTOP-XXXXXXX` is deliberately avoided because it is now a
+common sandbox indicator in its own right. Corporate names use a 3-letter
+uppercase org prefix followed by 6 consonant-alphanumeric characters
+(`XXX-XXXXXX`), matching common Active Directory naming conventions.
+
+Registry values `SpoofUsername` and `SpoofCompName` still override both random
+values in Trap mode for analysis campaigns that require a fixed, repeatable
+identity.
 
 **Reversible** — On service stop, all injected agents are detached via the
 stored function pointer in the PE header (r77-style header marker), all

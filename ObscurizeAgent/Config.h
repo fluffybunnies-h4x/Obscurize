@@ -25,6 +25,8 @@ typedef struct _OBS_CONFIG
     WCHAR SpoofComputerName[MAX_COMPUTERNAME_LENGTH + 1];
     BYTE  SpoofMacOUI[3];                   // First 3 bytes of the spoofed MAC
     BOOL  CustomMacOUI;                     // TRUE if SpoofMacOUI was set in registry
+    BOOL  HasCustomUsername;                // TRUE if SpoofUsername was read from registry
+    BOOL  HasCustomComputerName;            // TRUE if SpoofComputerName was read from registry
 
     // Domain spoofing (independent of Defensive/Trap mode)
     DWORD DomainMode;                       // OBS_DOMAIN_MODE_OFF/WORKGROUP/JOINED
