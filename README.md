@@ -414,7 +414,7 @@ The solution enforces the correct build order via project dependencies:
 ```
 ObscurizeAgent-x86  ->  output\ObscurizeAgent32.dll
 ObscurizeAgent-x64  ->  output\ObscurizeAgent64.dll
-ObscurizeService    ->  ObscurizeService\output\ObscurizeService.exe   (embeds both Agent DLLs)
+ObscurizeService    ->  output\ObscurizeService.exe        (embeds both Agent DLLs)
 ObscurizeGUI        ->  ObscurizeGUI\bin\Release\net48\ObscurizeGUI.exe
 ```
 
