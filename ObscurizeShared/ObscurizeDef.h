@@ -338,6 +338,14 @@
     L"RzSynapse.exe",            \
     L"RazerNgcx.exe",            \
     L"rzagent.exe",              \
+    L"Razer Central.exe",        \
+    L"Razer Updater.exe",        \
+    L"RazerCortex.exe",          \
+    L"RazerCortexBoostHelper.exe", \
+    L"CortexLauncher.exe",       \
+    L"CortexLauncherService.exe", \
+    L"RazerAxon.exe",            \
+    L"RazerAppEngine.exe",       \
     /* Other CEF-based game launchers – same class of issue  \
        as Steam; injecting into CEF renderers corrupts       \
        internal page loading */                              \
