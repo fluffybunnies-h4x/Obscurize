@@ -325,6 +325,19 @@
     L"steam.exe",                \
     L"steamwebhelper.exe",       \
     L"steamservice.exe",         \
+    /* Razer Synapse – CEF-based UI (same CIG issue as Steam); \
+       service processes call GetComputerNameExW for device  \
+       registration / cloud profile sync, so injection would \
+       corrupt peripheral bindings under the spoofed name */ \
+    L"RazerSynapse.exe",         \
+    L"Razer Synapse 3.exe",      \
+    L"RazerCentralService.exe",  \
+    L"RazerGameScannerService.exe", \
+    L"RazerBluetoothService.exe", \
+    L"RazerChromaSDKService.exe", \
+    L"RzSynapse.exe",            \
+    L"RazerNgcx.exe",            \
+    L"rzagent.exe",              \
     /* Other CEF-based game launchers – same class of issue  \
        as Steam; injecting into CEF renderers corrupts       \
        internal page loading */                              \
