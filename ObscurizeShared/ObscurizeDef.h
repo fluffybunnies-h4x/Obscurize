@@ -346,6 +346,7 @@
     L"CortexLauncherService.exe", \
     L"RazerAxon.exe",            \
     L"RazerAppEngine.exe",       \
+    L"RzSDKServer.exe",          \
     /* Other CEF-based game launchers – same class of issue  \
        as Steam; injecting into CEF renderers corrupts       \
        internal page loading */                              \
@@ -381,6 +382,10 @@
     L"fluent-bit.exe",           \
     L"fluentd.exe",              \
     L"wazuh-agent.exe",          \
+    /* Sublime Text – non-standard DLL loader; injection corrupts  \
+       ordinal resolution tables, producing "Ordinal Not Found"    \
+       dialogs and crashing the editor process on launch */        \
+    L"sublime_text.exe",         \
     NULL }
 
 #endif  // _OBSCURIZE_DEF_H
