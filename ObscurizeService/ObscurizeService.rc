@@ -19,8 +19,8 @@
 // ── Version information ────────────────────────────────────────
 
 VS_VERSION_INFO VERSIONINFO
-FILEVERSION     1,8,3,0
-PRODUCTVERSION  1,8,3,0
+FILEVERSION     1,8,4,0
+PRODUCTVERSION  1,8,4,0
 FILEFLAGSMASK   VS_FFI_FILEFLAGSMASK
 FILEFLAGS       0
 FILEOS          VOS_NT_WINDOWS32
@@ -33,12 +33,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName",      "Null-Sec\0"
             VALUE "FileDescription",  "Obscurize Deception Service\0"
-            VALUE "FileVersion",      "1.8.3.0\0"
+            VALUE "FileVersion",      "1.8.4.0\0"
             VALUE "InternalName",     "ObscurizeService\0"
             VALUE "LegalCopyright",   "Copyright \251 2026 Null-Sec\0"
             VALUE "OriginalFilename", "ObscurizeService.exe\0"
             VALUE "ProductName",      "Obscurize\0"
-            VALUE "ProductVersion",   "1.8.3\0"
+            VALUE "ProductVersion",   "1.8.4\0"
         END
     END
     BLOCK "VarFileInfo"
