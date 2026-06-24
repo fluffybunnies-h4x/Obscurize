@@ -386,6 +386,13 @@
        ordinal resolution tables, producing "Ordinal Not Found"    \
        dialogs and crashing the editor process on launch */        \
     L"sublime_text.exe",         \
+    /* Electron/CEF productivity apps – same CIG class as Chrome;  \
+       injection is blocked by unsigned-DLL policy and leaves the  \
+       process in a broken state.  Spoofed hostname/username would \
+       also corrupt API authentication and licensing checks */      \
+    L"Claude.exe",               \
+    L"Code.exe",                 \
+    L"cowork-svc.exe",           \
     NULL }
 
 #endif  // _OBSCURIZE_DEF_H
