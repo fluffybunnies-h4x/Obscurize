@@ -140,7 +140,8 @@ All commands below require an **elevated (Administrator) Command Prompt**.
 ```cmd
 sc create ObscurizeService ^
     binPath= "C:\Path\To\output\ObscurizeService.exe" ^
-    start= auto ^
+    start= demand ^
+    obj= LocalSystem ^
     DisplayName= "Obscurize Defensive Deception Service"
 
 sc description ObscurizeService ^
@@ -154,12 +155,19 @@ sc start ObscurizeService
 sc stop  ObscurizeService
 ```
 
-### Set startup mode (if changing from manual later)
+### Set startup mode
+
+The service is installed as `demand` (manual) by default.  After validating
+stability on the target system, promote using one of:
 
 ```cmd
-sc config ObscurizeService start= auto   :: start with Windows
-sc config ObscurizeService start= demand :: start manually
+sc config ObscurizeService start= delayed-auto  :: recommended — starts after AV/kernel services
+sc config ObscurizeService start= auto          :: plain automatic — not recommended
+sc config ObscurizeService start= demand        :: revert to manual start
 ```
+
+> Prefer `delayed-auto` over `auto` — it lets the kernel, AV, and core
+> security services fully initialise before Obscurize begins injecting.
 
 ### Remove the service
 

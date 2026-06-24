@@ -448,8 +448,20 @@ mkdir output 2>nul
 ## Recommended Deployment
 
 This section covers the recommended way to deploy Obscurize on a production
-or lab system so that both the service and the control panel start
-automatically without any manual steps after each reboot.
+or lab system.
+
+> **Caution — start with manual (demand) start.**  The service is installed
+> with `start= demand` by default so that an unforeseen compatibility issue
+> with a third-party driver or security product does not cause a boot loop or
+> repeated crashes.  Run Obscurize manually for a validation period first.
+> Once the system is confirmed stable, promote to automatic delayed start:
+>
+> ```cmd
+> sc config ObscurizeService start= delayed-auto
+> ```
+>
+> Use `delayed-auto` rather than plain `auto` — it lets the kernel, AV, and
+> core security services fully initialise before Obscurize begins injecting.
 
 ### 1. Copy binaries to the install directory
 
@@ -546,11 +558,14 @@ service can be registered manually from an elevated Command Prompt:
 ```cmd
 sc create ObscurizeService ^
     binPath= "C:\ProgramData\Obscurize\ObscurizeService.exe" ^
-    start= auto ^
+    start= demand ^
     obj= LocalSystem ^
     DisplayName= "Obscurize Defensive Deception Service"
 
 sc start ObscurizeService
+
+:: After validating stability, promote to automatic delayed start:
+:: sc config ObscurizeService start= delayed-auto
 ```
 
 Then launch `ObscurizeGUI.exe` (requires Administrator — it needs to

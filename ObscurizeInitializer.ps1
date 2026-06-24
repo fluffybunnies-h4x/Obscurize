@@ -8,7 +8,9 @@
 #    1. Verify ObscurizeService.exe and ObscurizeGUI.exe exist
 #       at the install path.
 #    2. Register (or update) ObscurizeService as a Windows
-#       Service that starts automatically with the system.
+#       Service registered with DEMAND (manual) start for initial deployment.
+#       Verify stable operation on the target system before switching to
+#       automatic start: sc config ObscurizeService start= delayed-auto
 #    3. Start the service immediately.
 #    4. Create a Task Scheduler task so ObscurizeGUI launches
 #       at logon for any member of BUILTIN\Administrators -
@@ -107,7 +109,7 @@ if ($existing)
 }
 else
 {
-    & sc.exe create $ServiceName binPath= "`"$ServiceExe`"" start= auto obj= LocalSystem DisplayName= "$ServiceDisplay" | Out-Null
+    & sc.exe create $ServiceName binPath= "`"$ServiceExe`"" start= demand obj= LocalSystem DisplayName= "$ServiceDisplay" | Out-Null
 
     if ($LASTEXITCODE -ne 0)
     {
@@ -176,7 +178,7 @@ Write-Host "  =======================================" -ForegroundColor Cyan
 Write-Host "       SETUP COMPLETE"                    -ForegroundColor Cyan
 Write-Host "  =======================================" -ForegroundColor Cyan
 Write-Host ""
-Write-Host "  ObscurizeService : auto-start, currently running"         -ForegroundColor Gray
+Write-Host "  ObscurizeService : demand (manual) start — start manually each boot until validated"         -ForegroundColor Gray
 Write-Host "  ObscurizeGUI     : launches at logon for all Administrators" -ForegroundColor Gray
 Write-Host ""
 Write-Host "  Launching ObscurizeGUI now..." -ForegroundColor White
