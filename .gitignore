@@ -37,6 +37,9 @@ ObscurizeService/ObscurizeService/
 # directory is not excluded wholesale, but EXEs must never accumulate here.
 output/*.exe
 
+# Stale per-project output dirs (service now outputs to root output\ only)
+ObscurizeService/output/
+
 # User-specific files
 *.user
 *.suo

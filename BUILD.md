@@ -95,7 +95,7 @@ Solution** (Ctrl+Shift+B) in Release mode will follow the correct sequence.
 Open a **x64 Native Tools Command Prompt for VS 2026** (from the Start menu).
 
 ```cmd
-cd /d C:\Users\groot\Documents\Null-Sec\Obscurize
+cd /d C:\path\to\Obscurize
 
 :: Create output directory
 mkdir output 2>nul
