@@ -258,9 +258,14 @@
     L"winlogon.exe",             \
     L"lsass.exe",                \
     L"lsaiso.exe",               \
-    /* Lock screen and logon UI – resolution hooks corrupt    \
-       the lock screen display; these are security UI with   \
-       no malware exposure */                                 \
+    /* Desktop compositor and lock screen UI – EnumDisplaySettingsW \
+       returning a spoofed resolution inside dwm.exe corrupts the  \
+       compositor framebuffer during lock screen transitions (AMD   \
+       integrated GPU propagates the spoofed value literally).      \
+       LockApp / LogonUI are excluded for the same reason.          \
+       No malware performs anti-analysis checks inside any of these \
+       processes, so exclusion carries zero spoofing cost */        \
+    L"dwm.exe",                  \
     L"LockApp.exe",              \
     L"LogonUI.exe",              \
     /* Windows Defender / AV – injecting triggers self-protection */ \
