@@ -1,10 +1,9 @@
 # ============================================================
 #  ObscurizeInitializer.ps1
 #
-#  One-shot setup script for Obscurize on a target system.
-#  Run this once after copying the built binaries to the
-#  install directory.  It will:
+#  Setup and uninstall script for Obscurize on a target system.
 #
+#  INSTALL (default):
 #    1. Verify ObscurizeService.exe and ObscurizeGUI.exe exist
 #       at the install path.
 #    2. Register (or update) the service with a randomized name
@@ -21,12 +20,18 @@
 #    5. Launch ObscurizeGUI now so the operator can verify
 #       the initial state.
 #
+#  UNINSTALL:
+#    .\ObscurizeInitializer.ps1 -Uninstall
+#    Reads service.cfg to find the registered service name, then:
+#    1. Stops and deletes the service.
+#    2. Removes the scheduled task.
+#    3. Removes HKLM\SOFTWARE\ObscurizeConfig registry key.
+#    4. Removes installed files and service.cfg.
+#
 #  Usage (from an elevated PowerShell session):
 #
 #    .\ObscurizeInitializer.ps1
-#
-#  Optional overrides:
-#
+#    .\ObscurizeInitializer.ps1 -Uninstall
 #    .\ObscurizeInitializer.ps1 -InstallPath "D:\Tools\Obscurize"
 #    .\ObscurizeInitializer.ps1 -ServiceName "MySvc" -DisplayName "My Service"
 #
@@ -35,7 +40,8 @@
 param(
     [string]$InstallPath = "C:\ProgramData\Obscurize",
     [string]$ServiceName = "",
-    [string]$DisplayName = ""
+    [string]$DisplayName = "",
+    [switch]$Uninstall
 )
 
 # --- Elevation guard -------------------------------------------------
@@ -47,6 +53,7 @@ if (-not $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Adm
     $relaunchArgs = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`" -InstallPath `"$InstallPath`""
     if ($ServiceName) { $relaunchArgs += " -ServiceName `"$ServiceName`"" }
     if ($DisplayName) { $relaunchArgs += " -DisplayName `"$DisplayName`"" }
+    if ($Uninstall)   { $relaunchArgs += " -Uninstall" }
     Start-Process powershell.exe -ArgumentList $relaunchArgs -Verb RunAs
     exit
 }
@@ -81,12 +88,156 @@ function New-ServiceIdentity
     }
 }
 
-# --- Config ----------------------------------------------------------
-$ServiceCfgPath     = Join-Path $InstallPath "service.cfg"
-$ServiceExe         = Join-Path $InstallPath "ObscurizeService.exe"
-$GuiExe             = Join-Path $InstallPath "ObscurizeGUI.exe"
-$TaskFolder         = "\Obscurize\"
-$TaskName           = "ObscurizeGUI"
+# --- Shared config ---------------------------------------------------
+$ServiceCfgPath = Join-Path $InstallPath "service.cfg"
+$ServiceExe     = Join-Path $InstallPath "ObscurizeService.exe"
+$GuiExe         = Join-Path $InstallPath "ObscurizeGUI.exe"
+$TaskFolder     = "\Obscurize\"
+$TaskName       = "ObscurizeGUI"
+$RegConfigPath  = "HKLM:\SOFTWARE\ObscurizeConfig"
+
+# ============================================================
+#  UNINSTALL PATH
+# ============================================================
+if ($Uninstall)
+{
+    Write-Host ""
+    Write-Host "  =======================================" -ForegroundColor Cyan
+    Write-Host "       OBSCURIZE UNINSTALLER"             -ForegroundColor Cyan
+    Write-Host "  =======================================" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "  Install path : $InstallPath" -ForegroundColor Gray
+    Write-Host ""
+
+    # Resolve service name from cfg, then param, then ask
+    $uninstallSvcName = ""
+    if (Test-Path $ServiceCfgPath)
+    {
+        $cfg              = Get-Content $ServiceCfgPath -Encoding UTF8 | ConvertFrom-StringData
+        $uninstallSvcName = $cfg.ServiceName
+        Write-Host "  Service name  : $uninstallSvcName (from service.cfg)" -ForegroundColor Gray
+    }
+    elseif ($ServiceName)
+    {
+        $uninstallSvcName = $ServiceName
+        Write-Host "  Service name  : $uninstallSvcName (from -ServiceName parameter)" -ForegroundColor Gray
+    }
+    else
+    {
+        Write-Host "  service.cfg not found at $ServiceCfgPath" -ForegroundColor Yellow
+        $uninstallSvcName = Read-Host "  Enter the registered service name to remove"
+        if (-not $uninstallSvcName)
+        {
+            Write-Host "  Aborted - no service name provided." -ForegroundColor Red
+            exit 1
+        }
+    }
+    Write-Host ""
+
+    # --- Uninstall step 1: Stop and delete the service ---------------
+    Write-Host "  [1/4] Removing service..." -ForegroundColor White
+
+    $svc = Get-Service -Name $uninstallSvcName -ErrorAction SilentlyContinue
+    if ($svc)
+    {
+        if ($svc.Status -eq "Running")
+        {
+            Write-Host "        Stopping service..." -ForegroundColor Yellow
+            Stop-Service -Name $uninstallSvcName -Force -ErrorAction SilentlyContinue
+            $svc.WaitForStatus("Stopped", (New-TimeSpan -Seconds 15))
+        }
+        & sc.exe delete $uninstallSvcName | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "        Service '$uninstallSvcName' deleted." -ForegroundColor Green
+        } else {
+            Write-Host "        WARNING: sc.exe delete returned exit $LASTEXITCODE - service may need manual removal." -ForegroundColor Yellow
+        }
+    }
+    else
+    {
+        Write-Host "        Service '$uninstallSvcName' not found - skipping." -ForegroundColor DarkGray
+    }
+
+    # --- Uninstall step 2: Remove scheduled task ---------------------
+    Write-Host ""
+    Write-Host "  [2/4] Removing scheduled task..." -ForegroundColor White
+
+    $task = Get-ScheduledTask -TaskName $TaskName -TaskPath $TaskFolder -ErrorAction SilentlyContinue
+    if ($task)
+    {
+        Unregister-ScheduledTask -TaskName $TaskName -TaskPath $TaskFolder -Confirm:$false
+        Write-Host "        Task '\Obscurize\ObscurizeGUI' removed." -ForegroundColor Green
+    }
+    else
+    {
+        Write-Host "        Task not found - skipping." -ForegroundColor DarkGray
+    }
+
+    # Remove the task folder if it is now empty
+    try {
+        $scheduler = New-Object -ComObject Schedule.Service
+        $scheduler.Connect()
+        $root = $scheduler.GetFolder("\")
+        $obsFolder = $root.GetFolder("Obscurize") 2>$null
+        if ($obsFolder -and $obsFolder.GetTasks(0).Count -eq 0) {
+            $root.DeleteFolder("Obscurize", 0)
+            Write-Host "        Task folder '\Obscurize\' removed." -ForegroundColor Green
+        }
+    } catch { }
+
+    # --- Uninstall step 3: Remove registry configuration -------------
+    Write-Host ""
+    Write-Host "  [3/4] Removing registry configuration..." -ForegroundColor White
+
+    if (Test-Path $RegConfigPath)
+    {
+        Remove-Item $RegConfigPath -Recurse -Force
+        Write-Host "        HKLM\SOFTWARE\ObscurizeConfig removed." -ForegroundColor Green
+    }
+    else
+    {
+        Write-Host "        Registry key not found - skipping." -ForegroundColor DarkGray
+    }
+
+    # --- Uninstall step 4: Remove installed files --------------------
+    Write-Host ""
+    Write-Host "  [4/4] Removing installed files..." -ForegroundColor White
+
+    foreach ($file in @($ServiceExe, $GuiExe, $ServiceCfgPath))
+    {
+        if (Test-Path $file)
+        {
+            Remove-Item $file -Force
+            Write-Host "        Removed $file" -ForegroundColor Green
+        }
+    }
+
+    # Remove install directory only if empty
+    if ((Test-Path $InstallPath) -and
+        ((Get-ChildItem $InstallPath -Force | Measure-Object).Count -eq 0))
+    {
+        Remove-Item $InstallPath -Force
+        Write-Host "        Removed empty directory $InstallPath" -ForegroundColor Green
+    }
+    elseif (Test-Path $InstallPath)
+    {
+        Write-Host "        Directory $InstallPath not empty - left in place." -ForegroundColor DarkGray
+    }
+
+    # --- Done --------------------------------------------------------
+    Write-Host ""
+    Write-Host "  =======================================" -ForegroundColor Cyan
+    Write-Host "       UNINSTALL COMPLETE"                -ForegroundColor Cyan
+    Write-Host "  =======================================" -ForegroundColor Cyan
+    Write-Host ""
+
+    exit 0
+}
+
+# ============================================================
+#  INSTALL PATH
+# ============================================================
+
 $ServiceDescription = ""
 $IsUpgrade          = $false
 
@@ -254,6 +405,9 @@ Write-Host ""
 Write-Host "  Start type : demand (manual) - start manually each boot until validated" -ForegroundColor Gray
 Write-Host "  To promote after validation:" -ForegroundColor Gray
 Write-Host "    sc config $ServiceName start= delayed-auto" -ForegroundColor DarkGray
+Write-Host ""
+Write-Host "  To uninstall:" -ForegroundColor Gray
+Write-Host "    .\ObscurizeInitializer.ps1 -Uninstall" -ForegroundColor DarkGray
 Write-Host ""
 Write-Host "  ObscurizeGUI : launches at logon for all Administrators" -ForegroundColor Gray
 Write-Host ""
