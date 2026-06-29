@@ -41,8 +41,71 @@ param(
     [string]$InstallPath = "C:\ProgramData\Obscurize",
     [string]$ServiceName = "",
     [string]$DisplayName = "",
-    [switch]$Uninstall
+    [switch]$Uninstall,
+    [Alias('h')]
+    [switch]$Help
 )
+
+# --- Help ------------------------------------------------------------
+if ($Help)
+{
+    Write-Host ""
+    Write-Host "  Obscurize Initializer" -ForegroundColor Cyan
+    Write-Host "  =====================" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "  Defensive deception tool setup and uninstall script." -ForegroundColor White
+    Write-Host "  Registers Obscurize as a Windows service with a randomized" -ForegroundColor White
+    Write-Host "  name and display name to reduce visibility in service scans." -ForegroundColor White
+    Write-Host ""
+    Write-Host "  USAGE" -ForegroundColor Yellow
+    Write-Host "    .\ObscurizeInitializer.ps1 [options]" -ForegroundColor White
+    Write-Host ""
+    Write-Host "  OPTIONS" -ForegroundColor Yellow
+    Write-Host "    -InstallPath  <path>   Directory containing ObscurizeService.exe and" -ForegroundColor White
+    Write-Host "                           ObscurizeGUI.exe.  Defaults to C:\ProgramData\Obscurize" -ForegroundColor White
+    Write-Host ""
+    Write-Host "    -ServiceName  <name>   Override the service internal name (SCM identifier)." -ForegroundColor White
+    Write-Host "                           If omitted, a randomized name is generated." -ForegroundColor White
+    Write-Host ""
+    Write-Host "    -DisplayName  <name>   Override the service display name (visible in" -ForegroundColor White
+    Write-Host "                           Services.msc).  If omitted, a randomized name" -ForegroundColor White
+    Write-Host "                           is generated." -ForegroundColor White
+    Write-Host ""
+    Write-Host "    -Uninstall             Stop and remove the service, scheduled task," -ForegroundColor White
+    Write-Host "                           registry configuration, and installed files." -ForegroundColor White
+    Write-Host "                           Reads service.cfg to find the service name." -ForegroundColor White
+    Write-Host ""
+    Write-Host "    -Help, -h              Show this help and exit." -ForegroundColor White
+    Write-Host ""
+    Write-Host "  NOTES" -ForegroundColor Yellow
+    Write-Host "    Requires an elevated (Administrator) session.  The script will" -ForegroundColor White
+    Write-Host "    prompt for elevation via UAC if run without it." -ForegroundColor White
+    Write-Host ""
+    Write-Host "    On fresh install, the chosen service identity is written to" -ForegroundColor White
+    Write-Host "    service.cfg in the install directory.  Subsequent runs (upgrades," -ForegroundColor White
+    Write-Host "    uninstalls) read this file automatically so the correct service" -ForegroundColor White
+    Write-Host "    is targeted without needing to remember the randomized name." -ForegroundColor White
+    Write-Host ""
+    Write-Host "    After installing, start the service manually and validate stability" -ForegroundColor White
+    Write-Host "    before enabling automatic start:" -ForegroundColor White
+    Write-Host "      sc start <ServiceName>" -ForegroundColor DarkGray
+    Write-Host "      sc config <ServiceName> start= delayed-auto" -ForegroundColor DarkGray
+    Write-Host ""
+    Write-Host "  EXAMPLES" -ForegroundColor Yellow
+    Write-Host "    Install with defaults (randomized service name):" -ForegroundColor White
+    Write-Host "      .\ObscurizeInitializer.ps1" -ForegroundColor DarkGray
+    Write-Host ""
+    Write-Host "    Install to a custom path:" -ForegroundColor White
+    Write-Host "      .\ObscurizeInitializer.ps1 -InstallPath D:\Tools\Obscurize" -ForegroundColor DarkGray
+    Write-Host ""
+    Write-Host "    Install with explicit service names:" -ForegroundColor White
+    Write-Host "      .\ObscurizeInitializer.ps1 -ServiceName WinDiagSvc -DisplayName 'Windows Diagnostic Service'" -ForegroundColor DarkGray
+    Write-Host ""
+    Write-Host "    Uninstall:" -ForegroundColor White
+    Write-Host "      .\ObscurizeInitializer.ps1 -Uninstall" -ForegroundColor DarkGray
+    Write-Host ""
+    exit 0
+}
 
 # --- Elevation guard -------------------------------------------------
 $currentIdentity  = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -54,6 +117,7 @@ if (-not $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Adm
     if ($ServiceName) { $relaunchArgs += " -ServiceName `"$ServiceName`"" }
     if ($DisplayName) { $relaunchArgs += " -DisplayName `"$DisplayName`"" }
     if ($Uninstall)   { $relaunchArgs += " -Uninstall" }
+    if ($Help)        { $relaunchArgs += " -Help" }
     Start-Process powershell.exe -ArgumentList $relaunchArgs -Verb RunAs
     exit
 }
