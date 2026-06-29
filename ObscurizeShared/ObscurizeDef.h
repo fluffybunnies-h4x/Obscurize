@@ -286,6 +286,16 @@
     L"RuntimeBroker.exe",        \
     L"sihost.exe",               \
     L"taskhostw.exe",            \
+    /* Windows Update / component servicing – TiWorker and            \
+       TrustedInstaller read hardware description and driver setup    \
+       registry keys extensively during driver installation.          \
+       NtQueryValueKey returning spoofed BIOS strings, or            \
+       NtEnumerateKey filtering keys these processes need, can        \
+       silently corrupt a driver installation that then manifests as  \
+       a kernel fault on next use.  No malware executes inside        \
+       component servicing processes */                               \
+    L"TiWorker.exe",             \
+    L"TrustedInstaller.exe",     \
     /* Build tools */ \
     L"MSBuild.exe",              \
     /* VMware Workstation host – uses named pipes for internal  \
