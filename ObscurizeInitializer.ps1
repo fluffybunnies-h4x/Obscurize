@@ -213,6 +213,9 @@ if ($Uninstall)
         & sc.exe delete $uninstallSvcName | Out-Null
         if ($LASTEXITCODE -eq 0) {
             Write-Host "        Service '$uninstallSvcName' deleted." -ForegroundColor Green
+            # Give the SCM a moment to release its handle on the service EXE
+            # before step 4 tries to delete the file.
+            Start-Sleep -Milliseconds 1500
         } else {
             Write-Host "        WARNING: sc.exe delete returned exit $LASTEXITCODE - service may need manual removal." -ForegroundColor Yellow
         }
@@ -267,12 +270,31 @@ if ($Uninstall)
     Write-Host ""
     Write-Host "  [4/4] Removing installed files..." -ForegroundColor White
 
+    # Kill the GUI process first - it is launched at the end of install
+    # and will hold a file lock on ObscurizeGUI.exe if still running.
+    $guiProc = Get-Process -Name "ObscurizeGUI" -ErrorAction SilentlyContinue
+    if ($guiProc)
+    {
+        Write-Host "        Stopping ObscurizeGUI process..." -ForegroundColor Yellow
+        $guiProc | Stop-Process -Force
+        Start-Sleep -Milliseconds 500
+    }
+
     foreach ($file in @($ServiceExe, $GuiExe, $ServiceCfgPath))
     {
         if (Test-Path $file)
         {
-            Remove-Item $file -Force
-            Write-Host "        Removed $file" -ForegroundColor Green
+            try
+            {
+                Remove-Item $file -Force -ErrorAction Stop
+                Write-Host "        Removed $file" -ForegroundColor Green
+            }
+            catch
+            {
+                Write-Host "        WARNING: Could not remove $file" -ForegroundColor Yellow
+                Write-Host "                 $($_.Exception.Message)" -ForegroundColor Yellow
+                Write-Host "                 Close any processes using the file and delete it manually." -ForegroundColor Yellow
+            }
         }
     }
 
