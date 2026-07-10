@@ -175,6 +175,7 @@
     L"vmwaretray.exe",     \
     L"vmwareuser.exe",     \
     L"vmacthlp.exe",       \
+    L"vm3dservice.exe",    \
     NULL }
 
 // ------------------------------------------------------------
@@ -192,6 +193,7 @@
     L"vmci",              \
     L"vmvss",             \
     L"VBoxService",       \
+    L"vm3dservice",       \
     NULL }
 
 // ------------------------------------------------------------
