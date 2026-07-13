@@ -19,7 +19,7 @@
     <Company>Null-Sec</Company>
     <Product>Obscurize</Product>
     <Copyright>Copyright © 2026 Null-Sec</Copyright>
-    <!-- Icon rendered programmatically by TrayIconRenderer – no .ico file needed -->
+    <ApplicationIcon>..\ObscurizeShared\Obscurize.ico</ApplicationIcon>
     <!-- Require elevation – the GUI must write to HKLM and talk to LocalSystem -->
     <ApplicationManifest>Properties\app.manifest</ApplicationManifest>
     <PlatformTarget>AnyCPU</PlatformTarget>

@@ -47,6 +47,9 @@ BEGIN
     END
 END
 
+// ── Application icon ─────────────────────────────────────────
+1  ICON  "..\\ObscurizeShared\\Obscurize.ico"
+
 // ── Embedded Agent DLLs ───────────────────────────────────────
 
 // 32-bit Agent DLL
