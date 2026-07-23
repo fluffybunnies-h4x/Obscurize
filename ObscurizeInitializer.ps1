@@ -25,7 +25,8 @@
 #    Reads service.cfg to find the registered service name, then:
 #    1. Stops and deletes the service.
 #    2. Removes the scheduled task.
-#    3. Removes HKLM\SOFTWARE\ObscurizeConfig registry key.
+#    3. Removes the config key, VM artefact keys, and restores the
+#       system-wide PowerShell profile.
 #    4. Removes installed files and service.cfg.
 #
 #  Usage (from an elevated PowerShell session):
@@ -158,7 +159,29 @@ $ServiceExe     = Join-Path $InstallPath "ObscurizeService.exe"
 $GuiExe         = Join-Path $InstallPath "ObscurizeGUI.exe"
 $TaskFolder     = "\Obscurize\"
 $TaskName       = "ObscurizeGUI"
-$RegConfigPath  = "HKLM:\SOFTWARE\ObscurizeConfig"
+
+# Config key. Must match OBS_CONFIG_KEY in ObscurizeShared\ObscurizeDef.h -
+# the service stores its config under this innocuous CurrentVersion path,
+# NOT under HKLM\SOFTWARE\ObscurizeConfig. The service does not delete this
+# key on stop, so the uninstaller is the only thing that removes it.
+$RegConfigPath  = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\DeviceCache"
+
+# Defensive-mode VM artefact keys created by the service. Normally removed by
+# the service itself on graceful stop (RemoveModeArtefacts); cleaned here as a
+# fallback in case the service was force-killed or crashed without cleanup.
+# NOTE: if this host genuinely has VMware or VirtualBox installed, these are
+# real product keys - the service already treats them as owned and deletes
+# them, so this mirrors existing behaviour rather than introducing new risk.
+$RegArtefactKeys = @(
+    "HKLM:\SOFTWARE\VMware, Inc.",
+    "HKLM:\SOFTWARE\Oracle"
+)
+
+# System-wide PowerShell profile installed to shadow Get-WmiObject/Get-CimInstance,
+# and the backup of any pre-existing profile. Paths match OBS_PS_PROFILE_PATH /
+# OBS_PS_PROFILE_BACKUP_PATH in ObscurizeDef.h.
+$PsProfilePath   = "C:\Windows\System32\WindowsPowerShell\v1.0\profile.ps1"
+$PsProfileBackup = "C:\Windows\System32\WindowsPowerShell\v1.0\profile.obs_backup"
 
 # ============================================================
 #  UNINSTALL PATH
@@ -252,18 +275,72 @@ if ($Uninstall)
         }
     } catch { }
 
-    # --- Uninstall step 3: Remove registry configuration -------------
+    # --- Uninstall step 3: Remove config, artefacts, restore profile -
     Write-Host ""
-    Write-Host "  [3/4] Removing registry configuration..." -ForegroundColor White
+    Write-Host "  [3/4] Removing registry configuration and artefacts..." -ForegroundColor White
 
+    # Config key (stored under an innocuous CurrentVersion path).
     if (Test-Path $RegConfigPath)
     {
-        Remove-Item $RegConfigPath -Recurse -Force
-        Write-Host "        HKLM\SOFTWARE\ObscurizeConfig removed." -ForegroundColor Green
+        Remove-Item $RegConfigPath -Recurse -Force -ErrorAction SilentlyContinue
+        if (Test-Path $RegConfigPath) {
+            Write-Host "        WARNING: could not remove config key - remove manually:" -ForegroundColor Yellow
+            Write-Host "                 $RegConfigPath" -ForegroundColor Yellow
+        } else {
+            Write-Host "        Config key removed." -ForegroundColor Green
+        }
     }
     else
     {
-        Write-Host "        Registry key not found - skipping." -ForegroundColor DarkGray
+        Write-Host "        Config key not found - skipping." -ForegroundColor DarkGray
+    }
+
+    # Defensive-mode VM artefact keys (fallback; normally cleaned by the service).
+    foreach ($key in $RegArtefactKeys)
+    {
+        if (Test-Path $key)
+        {
+            Remove-Item $key -Recurse -Force -ErrorAction SilentlyContinue
+            if (-not (Test-Path $key)) {
+                Write-Host "        Removed $key" -ForegroundColor Green
+            }
+        }
+    }
+
+    # System-wide PowerShell profile. Only touch profile.ps1 if it is
+    # Obscurize's own (identified by its auto-generated header) so a user's
+    # legitimate profile is never destroyed. Restore the backup if one exists.
+    $obsMarker = "# Obscurize WMI Hook Profile"
+    if (Test-Path $PsProfilePath)
+    {
+        $firstLine = Get-Content $PsProfilePath -TotalCount 1 -ErrorAction SilentlyContinue
+        if ($firstLine -like "$obsMarker*")
+        {
+            Remove-Item $PsProfilePath -Force -ErrorAction SilentlyContinue
+            if (Test-Path $PsProfileBackup)
+            {
+                Move-Item $PsProfileBackup $PsProfilePath -Force -ErrorAction SilentlyContinue
+                Write-Host "        Restored original profile.ps1 from backup." -ForegroundColor Green
+            }
+            else
+            {
+                Write-Host "        Removed Obscurize profile.ps1." -ForegroundColor Green
+            }
+        }
+        else
+        {
+            Write-Host "        profile.ps1 is not Obscurize's - left untouched." -ForegroundColor DarkGray
+        }
+    }
+    elseif (Test-Path $PsProfileBackup)
+    {
+        # Service already removed its profile.ps1 but left the backup - restore it.
+        Move-Item $PsProfileBackup $PsProfilePath -Force -ErrorAction SilentlyContinue
+        Write-Host "        Restored original profile.ps1 from backup." -ForegroundColor Green
+    }
+    else
+    {
+        Write-Host "        No PowerShell profile to restore - skipping." -ForegroundColor DarkGray
     }
 
     # --- Uninstall step 4: Remove installed files --------------------

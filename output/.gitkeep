@@ -1,0 +1,5 @@
+# This file keeps the output/ directory present in fresh clones.
+# The Agent projects build ObscurizeAgent32.dll / ObscurizeAgent64.dll here,
+# and ObscurizeService.rc embeds them as RCDATA. The DLLs are generated build
+# outputs and are intentionally NOT tracked (see .gitignore) so the service EXE
+# only ever embeds freshly-compiled, source-matching payload bytes.

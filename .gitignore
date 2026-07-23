@@ -33,9 +33,15 @@ ObscurizeService/ObscurizeService/
 **/bin/
 **/obj/
 
-# Agent DLL staging dir - DLLs are build inputs for the service .rc file so the
-# directory is not excluded wholesale, but EXEs must never accumulate here.
+# Agent DLL staging dir. The service .rc embeds ..\output\ObscurizeAgent{32,64}.dll
+# as RCDATA at build time, so these DLLs are *generated build outputs* - they must
+# be produced by a clean build of the Agent projects, never tracked in the repo.
+# Committing them lets an incremental / Service-only build embed stale (or tampered)
+# bytes into the payload the SYSTEM service injects into every process. The .gitkeep
+# preserves the directory on a fresh clone so the build/.rc paths resolve.
+output/*.dll
 output/*.exe
+!output/.gitkeep
 
 # Stale per-project output dirs (service now outputs to root output\ only)
 ObscurizeService/output/
