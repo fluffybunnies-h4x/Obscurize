@@ -1,6 +1,7 @@
 using System;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 
 namespace Obscurize
@@ -43,6 +44,7 @@ namespace Obscurize
 
         // ── Controls ──────────────────────────────────────────────
         private readonly Label        _lblStatusBadge;
+        private readonly Label        _lblServiceIdentity;
         private readonly PowerButton  _btnPower;
         private readonly ModeButton   _btnDefensive;
         private readonly ModeButton   _btnTrap;
@@ -127,9 +129,23 @@ namespace Obscurize
                 Font      = new Font("Segoe UI", 16f, FontStyle.Bold, GraphicsUnit.Point),
                 ForeColor = ColText,
                 AutoSize  = false,
-                Bounds    = new Rectangle(16, 16, 220, 32),
+                Bounds    = new Rectangle(16, 10, 300, 30),
                 TextAlign = ContentAlignment.MiddleLeft,
                 BackColor = Color.Transparent,
+            };
+
+            // Populated asynchronously by UpdateServiceIdentity() – WMI lookup
+            // of the running service's randomized name, so the operator never
+            // needs to open service.cfg to find which service to manage.
+            _lblServiceIdentity = new Label
+            {
+                Font      = new Font("Segoe UI", 7.5f, FontStyle.Regular, GraphicsUnit.Point),
+                ForeColor = ColTextDim,
+                AutoSize  = false,
+                Bounds    = new Rectangle(16, 42, 340, 16),
+                TextAlign = ContentAlignment.MiddleLeft,
+                BackColor = Color.Transparent,
+                Text      = "Service: locating…",
             };
 
             _lblStatusBadge = new Label
@@ -145,6 +161,7 @@ namespace Obscurize
             RoundCorners(_lblStatusBadge, 4);
 
             pnlHeader.Controls.Add(lblTitle);
+            pnlHeader.Controls.Add(_lblServiceIdentity);
             pnlHeader.Controls.Add(_lblStatusBadge);
             Controls.Add(pnlHeader);
 
@@ -322,6 +339,8 @@ namespace Obscurize
             catch { /* registry not yet created – leave default Off */ }
             UpdateDomainButtonSelection();
 
+            UpdateServiceIdentity();
+
             StatusPoller.Current.StatusChanged += (_, s) => this.Invoke(new Action(() => UpdateStatus(s)));
             // Sync with whatever the poller already knows – avoids the race where
             // the poller transitions from ServiceOffline → ActiveDefensive before
@@ -330,6 +349,22 @@ namespace Obscurize
 
             AppendLog("Control panel opened.", ColTextDim);
             AppendLog("Polling service status…", ColTextDim);
+        }
+
+        // ── Service identity lookup ───────────────────────────────
+
+        private void UpdateServiceIdentity()
+        {
+            Task.Run(() =>
+            {
+                var svc = ServiceLocator.FindObscurizeService();
+                string text = svc is { } s
+                    ? $"Service:  {s.DisplayName}  ({s.ServiceName})"
+                    : "Service: not found - is it installed?";
+
+                if (InvokeRequired) Invoke(new Action(() => _lblServiceIdentity.Text = text));
+                else _lblServiceIdentity.Text = text;
+            });
         }
 
         // ── Status update ─────────────────────────────────────────

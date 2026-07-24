@@ -31,4 +31,9 @@
     <Compile Include="..\ObscurizeShared\ObscurizeConst.cs" Link="ObscurizeConst.cs" />
   </ItemGroup>
 
+  <!-- WMI lookup of the running service's randomized name (ServiceLocator.cs) -->
+  <ItemGroup>
+    <Reference Include="System.Management" />
+  </ItemGroup>
+
 </Project>
