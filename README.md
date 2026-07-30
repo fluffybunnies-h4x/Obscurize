@@ -124,7 +124,7 @@ Obscurize exploits this behaviour in two directions:
 | `NtQueryValueKey` (BIOS registry key) | NT hook | Dell BIOS strings (manufacturer, product, serial, UUID) |
 | `GetSystemFirmwareTable` (raw SMBIOS) | API hook | Dell manufacturer / product in RSMB table |
 | `wmic path Win32_BIOS get SerialNumber` | Pre-injection (`CREATE_SUSPENDED`) + WriteConsoleW hook | Dell BIOS serial string |
-| `EnumServicesStatusExW/A` | API hook | VM service names filtered out |
+| `EnumServicesStatusExW/A` / `EnumServicesStatusW/A` | API hook | VM service names filtered out |
 | `NtQuerySystemInformation` | NT hook | VM process names filtered out |
 | `NtEnumerateKey` / `NtQueryKey` | NT hook | VM vendor registry subkeys filtered from `HKLM\SOFTWARE`; Obscurize config key hidden from `CurrentVersion` enumeration |
 | VMware / VirtualBox registry keys | Registry delete | Removed |
@@ -188,6 +188,20 @@ in stdout before they reach the terminal, providing a second interception layer
 for cases where the SMBIOS data flows through a code path not covered by
 `NtQueryValueKey`.
 
+#### Service Enumeration Detail
+
+There are two separate, similarly-named Win32 APIs for listing Windows
+services: `EnumServicesStatusEx` (the newer "Ex" variant, which supports
+group-name filtering and returns process IDs) and the older, plain
+`EnumServicesStatus`. Native callers — Task Manager's Services tab,
+`tasklist.exe` — reach the "Ex" family. .NET's
+`System.ServiceProcess.ServiceController.GetServices()` — and therefore
+PowerShell's `Get-Service` cmdlet — calls the older, plain
+`EnumServicesStatusW`. Hooking only the "Ex" family (the original
+implementation) left `Get-Service` completely unfiltered in Trap mode even
+though every native enumeration path was correctly hidden. Both families are
+now hooked, covering native and managed callers alike.
+
 #### Domain Join Spoofing Detail
 
 Inspired by the [FAUX ELEVATE campaign](https://www.securonix.com/blog/faux-elevate-threat-actors-crypto-miners-and-infostealers/),
@@ -247,6 +261,8 @@ is `systeminfo.exe` or `wmic.exe`.
 | `GetAdaptersInfo` | iphlpapi | OUI `00:0C:29` (VMware) | OUI `00:1B:21` (Intel) |
 | `EnumServicesStatusExW` | advapi32 | Pass-through | Filters VM service names |
 | `EnumServicesStatusExA` | advapi32 | Pass-through | Filters VM service names |
+| `EnumServicesStatusW` | advapi32 | Pass-through | Filters VM service names |
+| `EnumServicesStatusA` | advapi32 | Pass-through | Filters VM service names |
 | `NtQuerySystemInformation` | ntdll | Pass-through | Filters VM process names |
 | `NtEnumerateKey` | ntdll | Hides Obscurize config key from `CurrentVersion` enumeration | Hides config key from `CurrentVersion` enumeration + filters VM vendor subkeys from `HKLM\SOFTWARE` |
 | `NtQueryKey` | ntdll | Corrects SubKeys count after config key concealment | Corrects SubKeys count after config key concealment and VM vendor key filtering |

@@ -124,6 +124,18 @@ static BOOL  (WINAPI *OriginalEnumServicesStatusExA)(SC_HANDLE, SC_ENUM_TYPE,
                                                      DWORD, LPDWORD, LPDWORD,
                                                      LPDWORD, LPCSTR)          = NULL;
 
+// DIAGNOSTIC ONLY – testing whether some callers (e.g. .NET's
+// ServiceController.GetServices(), used by PowerShell's Get-Service)
+// reach the plain (non-Ex) EnumServicesStatus instead of the Ex variant
+// above.  ENUM_SERVICE_STATUSW has no ProcessId field, unlike
+// ENUM_SERVICE_STATUS_PROCESSW, so filtering here is structurally simpler.
+static BOOL  (WINAPI *OriginalEnumServicesStatusW)(SC_HANDLE, DWORD, DWORD,
+                                                    LPBYTE, DWORD, LPDWORD,
+                                                    LPDWORD, LPDWORD)         = NULL;
+static BOOL  (WINAPI *OriginalEnumServicesStatusA)(SC_HANDLE, DWORD, DWORD,
+                                                    LPBYTE, DWORD, LPDWORD,
+                                                    LPDWORD, LPDWORD)         = NULL;
+
 // ntdll
 static NT_NTQUERYSYSTEMINFORMATION  OriginalNtQuerySystemInformation  = NULL;
 static NT_NTENUMERATEKEY            OriginalNtEnumerateKey            = NULL;
@@ -503,6 +515,94 @@ static BOOL WINAPI HookedEnumServicesStatusExA(SC_HANDLE hSCManager,
             if (writeIdx != i)
                 CopyMemory(&entries[writeIdx], &entries[i],
                            sizeof(ENUM_SERVICE_STATUS_PROCESSA));
+            writeIdx++;
+        }
+    }
+    *lpServicesReturned = writeIdx;
+    return result;
+}
+
+// ------------------------------------------------------------
+//  EnumServicesStatusW / EnumServicesStatusA  (plain, non-Ex)
+//  .NET's ServiceController.GetServices() – and therefore
+//  PowerShell's Get-Service – calls this older API rather than
+//  the Ex variant above, so both must be hooked for Trap mode
+//  service hiding to cover both native (Ex) and managed (non-Ex)
+//  callers. ENUM_SERVICE_STATUSW/A has no InfoLevel parameter and
+//  no ProcessId field – it's always the "process info" shape.
+// ------------------------------------------------------------
+static BOOL WINAPI HookedEnumServicesStatusW(SC_HANDLE hSCManager,
+                                              DWORD dwServiceType,
+                                              DWORD dwServiceState,
+                                              LPBYTE lpServices,
+                                              DWORD cbBufSize,
+                                              LPDWORD pcbBytesNeeded,
+                                              LPDWORD lpServicesReturned,
+                                              LPDWORD lpResumeHandle)
+{
+    BOOL result = OriginalEnumServicesStatusW(hSCManager, dwServiceType,
+                                              dwServiceState, lpServices, cbBufSize,
+                                              pcbBytesNeeded, lpServicesReturned,
+                                              lpResumeHandle);
+
+    if (!result || !ObsIsEnabled() || ObsGetMode() != OBS_MODE_TRAP)
+        return result;
+
+    if (!lpServices || !lpServicesReturned)
+        return result;
+
+    LPENUM_SERVICE_STATUSW entries = (LPENUM_SERVICE_STATUSW)lpServices;
+    DWORD count = *lpServicesReturned;
+    DWORD writeIdx = 0;
+
+    for (DWORD i = 0; i < count; i++)
+    {
+        if (!IsVmServiceName(entries[i].lpServiceName))
+        {
+            if (writeIdx != i)
+                CopyMemory(&entries[writeIdx], &entries[i],
+                           sizeof(ENUM_SERVICE_STATUSW));
+            writeIdx++;
+        }
+    }
+    *lpServicesReturned = writeIdx;
+    return result;
+}
+
+static BOOL WINAPI HookedEnumServicesStatusA(SC_HANDLE hSCManager,
+                                              DWORD dwServiceType,
+                                              DWORD dwServiceState,
+                                              LPBYTE lpServices,
+                                              DWORD cbBufSize,
+                                              LPDWORD pcbBytesNeeded,
+                                              LPDWORD lpServicesReturned,
+                                              LPDWORD lpResumeHandle)
+{
+    BOOL result = OriginalEnumServicesStatusA(hSCManager, dwServiceType,
+                                              dwServiceState, lpServices, cbBufSize,
+                                              pcbBytesNeeded, lpServicesReturned,
+                                              lpResumeHandle);
+
+    if (!result || !ObsIsEnabled() || ObsGetMode() != OBS_MODE_TRAP)
+        return result;
+
+    if (!lpServices || !lpServicesReturned)
+        return result;
+
+    LPENUM_SERVICE_STATUSA entries = (LPENUM_SERVICE_STATUSA)lpServices;
+    DWORD count = *lpServicesReturned;
+    DWORD writeIdx = 0;
+
+    for (DWORD i = 0; i < count; i++)
+    {
+        WCHAR wname[256] = { 0 };
+        MultiByteToWideChar(CP_ACP, 0, entries[i].lpServiceName, -1, wname, 256);
+
+        if (!IsVmServiceName(wname))
+        {
+            if (writeIdx != i)
+                CopyMemory(&entries[writeIdx], &entries[i],
+                           sizeof(ENUM_SERVICE_STATUSA));
             writeIdx++;
         }
     }
@@ -1843,6 +1943,8 @@ VOID InitializeHooks(VOID)
     OriginalGetAdaptersInfo        = (DWORD (WINAPI*)(PIP_ADAPTER_INFO,PULONG))       RESOLVE_IPHLP(GetAdaptersInfo);
     OriginalEnumServicesStatusExW  = (BOOL  (WINAPI*)(SC_HANDLE,SC_ENUM_TYPE,DWORD,DWORD,LPBYTE,DWORD,LPDWORD,LPDWORD,LPDWORD,LPCWSTR)) RESOLVE_ADV(EnumServicesStatusExW);
     OriginalEnumServicesStatusExA  = (BOOL  (WINAPI*)(SC_HANDLE,SC_ENUM_TYPE,DWORD,DWORD,LPBYTE,DWORD,LPDWORD,LPDWORD,LPDWORD,LPCSTR))  RESOLVE_ADV(EnumServicesStatusExA);
+    OriginalEnumServicesStatusW    = (BOOL  (WINAPI*)(SC_HANDLE,DWORD,DWORD,LPBYTE,DWORD,LPDWORD,LPDWORD,LPDWORD)) RESOLVE_ADV(EnumServicesStatusW);
+    OriginalEnumServicesStatusA    = (BOOL  (WINAPI*)(SC_HANDLE,DWORD,DWORD,LPBYTE,DWORD,LPDWORD,LPDWORD,LPDWORD)) RESOLVE_ADV(EnumServicesStatusA);
     OriginalNtQuerySystemInformation = (NT_NTQUERYSYSTEMINFORMATION)RESOLVE_NTDLL(NtQuerySystemInformation);
     OriginalNtEnumerateKey           = (NT_NTENUMERATEKEY)          RESOLVE_NTDLL(NtEnumerateKey);
     OriginalNtQueryKey               = (NT_NTQUERYKEY)              RESOLVE_NTDLL(NtQueryKey);
@@ -1868,6 +1970,8 @@ VOID InitializeHooks(VOID)
     if (OriginalGetAdaptersInfo)       DetourAttach(&(PVOID)OriginalGetAdaptersInfo,       HookedGetAdaptersInfo);
     if (OriginalEnumServicesStatusExW) DetourAttach(&(PVOID)OriginalEnumServicesStatusExW, HookedEnumServicesStatusExW);
     if (OriginalEnumServicesStatusExA) DetourAttach(&(PVOID)OriginalEnumServicesStatusExA, HookedEnumServicesStatusExA);
+    if (OriginalEnumServicesStatusW)   DetourAttach(&(PVOID)OriginalEnumServicesStatusW,   HookedEnumServicesStatusW);
+    if (OriginalEnumServicesStatusA)   DetourAttach(&(PVOID)OriginalEnumServicesStatusA,   HookedEnumServicesStatusA);
     if (OriginalNtQuerySystemInformation) DetourAttach(&(PVOID)OriginalNtQuerySystemInformation, HookedNtQuerySystemInformation);
     if (OriginalNtEnumerateKey)        DetourAttach(&(PVOID)OriginalNtEnumerateKey,        HookedNtEnumerateKey);
     if (OriginalNtQueryKey)            DetourAttach(&(PVOID)OriginalNtQueryKey,            HookedNtQueryKey);
@@ -1911,6 +2015,8 @@ VOID UninitializeHooks(VOID)
     if (OriginalGetAdaptersInfo)       DetourDetach(&(PVOID)OriginalGetAdaptersInfo,       HookedGetAdaptersInfo);
     if (OriginalEnumServicesStatusExW) DetourDetach(&(PVOID)OriginalEnumServicesStatusExW, HookedEnumServicesStatusExW);
     if (OriginalEnumServicesStatusExA) DetourDetach(&(PVOID)OriginalEnumServicesStatusExA, HookedEnumServicesStatusExA);
+    if (OriginalEnumServicesStatusW)   DetourDetach(&(PVOID)OriginalEnumServicesStatusW,   HookedEnumServicesStatusW);
+    if (OriginalEnumServicesStatusA)   DetourDetach(&(PVOID)OriginalEnumServicesStatusA,   HookedEnumServicesStatusA);
     if (OriginalNtQuerySystemInformation) DetourDetach(&(PVOID)OriginalNtQuerySystemInformation, HookedNtQuerySystemInformation);
     if (OriginalNtEnumerateKey)        DetourDetach(&(PVOID)OriginalNtEnumerateKey,        HookedNtEnumerateKey);
     if (OriginalNtQueryKey)            DetourDetach(&(PVOID)OriginalNtQueryKey,            HookedNtQueryKey);
