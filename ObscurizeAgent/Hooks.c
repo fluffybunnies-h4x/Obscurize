@@ -166,6 +166,7 @@ static BOOL (WINAPI *OriginalWriteConsoleW)(
 // Set once at InitializeHooks time – TRUE only when injected into systeminfo.exe / wmic.exe
 static BOOL   g_IsSystemInfo  = FALSE;
 static BOOL   g_IsWmic        = FALSE;
+static BOOL   g_IsWhoami      = FALSE;
 static HANDLE g_StdoutHandle  = INVALID_HANDLE_VALUE;
 
 // Stateful serial-number replacement for wmic.exe output.
@@ -317,6 +318,155 @@ static BOOL WINAPI HookedGetComputerNameExA(COMPUTER_NAME_FORMAT fmt, LPSTR buf,
     }
     WideCharToMultiByte(CP_ACP, 0, spoofedW, -1, buf, *size, NULL, NULL);
     *size = (DWORD)(needed - 1);
+    return TRUE;
+}
+
+// ------------------------------------------------------------
+//  GetUserNameExW  (secur32.dll)
+//  Returns DOMAIN\user in the NameSamCompatible format.  NOTE: plain `whoami`
+//  does NOT use this — it resolves the token SID via LookupAccountSidW (see
+//  below).  GetUserNameExW is imported by whoami only for /upn and /fqdn.  We
+//  still spoof the NameSamCompatible format here for any OTHER tool that reaches
+//  for it, and pass every other EXTENDED_NAME_FORMAT (NameUserPrincipal,
+//  NameFullyQualifiedDN, …) through untouched so auth / SSO paths keep working.
+// ------------------------------------------------------------
+
+// Defined inline to avoid a <security.h> dependency (mirrors the OBS_NetSetup*
+// constants defined near the NetGetJoinInformation hook).  SEC_ENTRY is __stdcall
+// on x86 and a no-op under the x64 calling convention.
+#ifndef SEC_ENTRY
+#define SEC_ENTRY __stdcall
+#endif
+#define OBS_NameSamCompatible  2   // EXTENDED_NAME_FORMAT value used by whoami
+
+typedef BOOLEAN (SEC_ENTRY *PFN_GetUserNameExW)(int, LPWSTR, PULONG);
+static PFN_GetUserNameExW OriginalGetUserNameExW = NULL;
+
+static BOOLEAN SEC_ENTRY HookedGetUserNameExW(int NameFormat, LPWSTR lpNameBuffer, PULONG nSize)
+{
+    if (!ObsIsEnabled() || NameFormat != OBS_NameSamCompatible)
+        return OriginalGetUserNameExW(NameFormat, lpNameBuffer, nSize);
+
+    // Build PREFIX\username.  PREFIX is the spoofed computer name (workgroup),
+    // or the NetBIOS form of the spoofed domain when domain-joined, so whoami
+    // lines up with systeminfo's Host Name / Domain fields.
+    WCHAR username[64];
+    ObsGetSpoofUsername(username, ARRAYSIZE(username));
+
+    WCHAR prefix[256];
+    if (ObsGetDomainMode() == OBS_DOMAIN_MODE_JOINED)
+    {
+        ObsGetSpoofDomainName(prefix, ARRAYSIZE(prefix));
+        WCHAR *dot = wcschr(prefix, L'.');   // NetBIOS form: strip at first '.'
+        if (dot) *dot = L'\0';
+        CharUpperW(prefix);
+    }
+    else
+    {
+        ObsGetSpoofComputerName(prefix, ARRAYSIZE(prefix));
+    }
+
+    WCHAR spoofed[320];
+    StringCchPrintfW(spoofed, ARRAYSIZE(spoofed), L"%s\\%s", prefix, username);
+
+    ULONG needed = (ULONG)(wcslen(spoofed) + 1);
+    if (!lpNameBuffer || !nSize || *nSize < needed)
+    {
+        if (nSize) *nSize = needed;              // required size, including null
+        SetLastError(ERROR_MORE_DATA);
+        return FALSE;
+    }
+    StringCchCopyW(lpNameBuffer, *nSize, spoofed);
+    *nSize = needed - 1;                          // success: count excludes null
+    return TRUE;
+}
+
+// ------------------------------------------------------------
+//  LookupAccountSidW  (advapi32.dll)
+//  This is what plain `whoami` and `whoami /all` actually use: read the token's
+//  user SID (GetTokenInformation/TokenUser) and resolve it to Name + Domain.
+//  We spoof ONLY the current process user's own SID — every other SID (groups,
+//  other users, well-known SIDs) passes straight through, so ACL/security
+//  displays in other injected processes are unaffected.  The token still holds
+//  the real SID; we only rewrite the name it resolves to.
+// ------------------------------------------------------------
+
+typedef BOOL (WINAPI *PFN_LookupAccountSidW)(LPCWSTR, PSID, LPWSTR, LPDWORD, LPWSTR, LPDWORD, PSID_NAME_USE);
+static PFN_LookupAccountSidW OriginalLookupAccountSidW = NULL;
+
+// Cache the current process user's SID once (it does not change per process).
+static BOOL g_UserSidValid = FALSE;
+static BYTE g_UserSid[SECURITY_MAX_SID_SIZE];
+
+static BOOL IsCurrentUserSid(PSID sid)
+{
+    if (!g_UserSidValid)
+    {
+        HANDLE tok = NULL;
+        if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &tok) && tok)
+        {
+            BYTE  buf[SECURITY_MAX_SID_SIZE + sizeof(TOKEN_USER)];
+            DWORD len = 0;
+            if (GetTokenInformation(tok, TokenUser, buf, sizeof(buf), &len))
+            {
+                PSID  u  = ((PTOKEN_USER)buf)->User.Sid;
+                DWORD sl = GetLengthSid(u);
+                if (sl <= sizeof(g_UserSid))
+                {
+                    CopyMemory(g_UserSid, u, sl);
+                    g_UserSidValid = TRUE;
+                }
+            }
+            CloseHandle(tok);
+        }
+    }
+    return g_UserSidValid && sid && IsValidSid(sid) && EqualSid(sid, (PSID)g_UserSid);
+}
+
+static BOOL WINAPI HookedLookupAccountSidW(
+    LPCWSTR lpSystemName, PSID Sid,
+    LPWSTR Name, LPDWORD cchName,
+    LPWSTR ReferencedDomainName, LPDWORD cchReferencedDomainName,
+    PSID_NAME_USE peUse)
+{
+    if (!ObsIsEnabled() || !IsCurrentUserSid(Sid))
+        return OriginalLookupAccountSidW(lpSystemName, Sid, Name, cchName,
+                                         ReferencedDomainName, cchReferencedDomainName, peUse);
+
+    WCHAR spoofName[64];
+    ObsGetSpoofUsername(spoofName, ARRAYSIZE(spoofName));
+
+    WCHAR spoofDom[256];
+    if (ObsGetDomainMode() == OBS_DOMAIN_MODE_JOINED)
+    {
+        ObsGetSpoofDomainName(spoofDom, ARRAYSIZE(spoofDom));
+        WCHAR *dot = wcschr(spoofDom, L'.');   // NetBIOS form: strip at first '.'
+        if (dot) *dot = L'\0';
+        CharUpperW(spoofDom);
+    }
+    else
+    {
+        ObsGetSpoofComputerName(spoofDom, ARRAYSIZE(spoofDom));
+    }
+
+    DWORD needName = (DWORD)(wcslen(spoofName) + 1);
+    DWORD needDom  = (DWORD)(wcslen(spoofDom)  + 1);
+    DWORD haveName = cchName ? *cchName : 0;
+    DWORD haveDom  = cchReferencedDomainName ? *cchReferencedDomainName : 0;
+
+    if (!Name || !ReferencedDomainName || haveName < needName || haveDom < needDom)
+    {
+        if (cchName)                 *cchName                 = needName;   // incl. null
+        if (cchReferencedDomainName) *cchReferencedDomainName = needDom;
+        SetLastError(ERROR_INSUFFICIENT_BUFFER);
+        return FALSE;
+    }
+
+    StringCchCopyW(Name, haveName, spoofName);
+    StringCchCopyW(ReferencedDomainName, haveDom, spoofDom);
+    *cchName                 = needName - 1;   // success: counts exclude null
+    *cchReferencedDomainName = needDom - 1;
+    if (peUse) *peUse = SidTypeUser;
     return TRUE;
 }
 
@@ -1004,12 +1154,7 @@ static BOOL RequestImmediateInjection(DWORD pid)
 {
     // Wait up to 1 s for the pipe to be available.
     if (!WaitNamedPipeW(OBS_CONTROL_PIPE_NAME, 1000))
-    {
-        WCHAR dbg[128];
-        wsprintfW(dbg, L"[Obs] INJECT_PID: WaitNamedPipe FAILED pid=%lu err=%lu\n", pid, GetLastError());
-        OutputDebugStringW(dbg);
         return FALSE;
-    }
 
     HANDLE pipe = CreateFileW(
         OBS_CONTROL_PIPE_NAME,
@@ -1018,12 +1163,7 @@ static BOOL RequestImmediateInjection(DWORD pid)
         OPEN_EXISTING,
         SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, NULL);
     if (pipe == INVALID_HANDLE_VALUE)
-    {
-        WCHAR dbg[128];
-        wsprintfW(dbg, L"[Obs] INJECT_PID: CreateFile FAILED pid=%lu err=%lu\n", pid, GetLastError());
-        OutputDebugStringW(dbg);
         return FALSE;
-    }
 
     DWORD pipeMode = PIPE_READMODE_MESSAGE;
     SetNamedPipeHandleState(pipe, &pipeMode, NULL, NULL);
@@ -1045,12 +1185,38 @@ static BOOL RequestImmediateInjection(DWORD pid)
         }
     }
 
-    WCHAR dbg[128];
-    wsprintfW(dbg, L"[Obs] INJECT_PID: pid=%lu result=%d\n", pid, (int)ok);
-    OutputDebugStringW(dbg);
-
     CloseHandle(pipe);
     return ok;
+}
+
+// ------------------------------------------------------------
+//  InjectAndWaitForAgent
+//  Request injection into a suspended process, then block until its agent
+//  reports that hooks are installed.
+//
+//  InjectDll() returns once the remote loader thread is CREATED, so the
+//  service's OK reply does NOT mean the hooks are live.  Resuming on that
+//  reply lets a fast process (plain `whoami`) run to completion before its
+//  hooks attach.  The ready event MUST be created here, before injection is
+//  requested — otherwise the agent may create, signal, and close the only
+//  handle to it before this thread starts waiting, and we would then wait on a
+//  brand-new unsignaled event until the timeout.
+// ------------------------------------------------------------
+static VOID InjectAndWaitForAgent(DWORD pid)
+{
+    WCHAR evName[64];
+    StringCchPrintfW(evName, ARRAYSIZE(evName), OBS_AGENT_READY_EVENT_FMT, pid);
+    HANDLE ready = CreateEventW(NULL, TRUE, FALSE, evName);   // manual reset
+
+    RequestImmediateInjection(pid);
+
+    if (ready)
+    {
+        // On timeout we resume anyway: worst case is the old unsynchronized
+        // behaviour (hooks may not be attached yet), never a hang.
+        WaitForSingleObject(ready, OBS_AGENT_READY_TIMEOUT_MS);
+        CloseHandle(ready);
+    }
 }
 
 // ------------------------------------------------------------
@@ -1140,7 +1306,7 @@ static BOOL WINAPI HookedCreateProcessW(
 {
     LPWSTR modifiedCmd = NULL;
     LPWSTR cmdToUse    = lpCommandLine;
-    BOOL   injectWmic  = FALSE;
+    BOOL   injectShortLived = FALSE;
     BOOL   result;
 
     if (ObsIsEnabled())
@@ -1172,7 +1338,9 @@ static BOOL WINAPI HookedCreateProcessW(
             }
         }
 
-        // wmic.exe: detect by name so we can pre-inject before it runs.
+        // Short-lived recon tools (wmic.exe, whoami.exe) exit faster than the
+        // service's 100 ms process poll can inject them, so pre-inject them via a
+        // suspended start (same race the wmic path was built to close).
         BOOL isWmic = (lpApplicationName && StrStrIW(lpApplicationName, L"wmic.exe") != NULL) ||
                       (lpCommandLine     && StrStrIW(lpCommandLine,     L"wmic.exe") != NULL);
         if (!isWmic && lpCommandLine)
@@ -1186,37 +1354,21 @@ static BOOL WINAPI HookedCreateProcessW(
             }
         }
 
-        injectWmic = isWmic;
+        // whoami.exe: prints DOMAIN\user via GetUserNameExW (secur32), which our
+        // hook spoofs — but only if the agent is present before it runs.
+        BOOL isWhoami = (lpApplicationName && StrStrIW(lpApplicationName, L"whoami") != NULL) ||
+                        (lpCommandLine     && StrStrIW(lpCommandLine,     L"whoami") != NULL);
+
+        injectShortLived = isWmic || isWhoami;
     }
 
-    // Unconditional trace – fires regardless of enabled state so we can confirm
-    // the hook is reaching cmd.exe and see the raw app/cmd strings it passes.
-    {
-        WCHAR dbg[256];
-        WCHAR appShort[64] = L"(null)";
-        WCHAR cmdShort[64] = L"(null)";
-        if (lpApplicationName)
-        {
-            StringCchCopyW(appShort, 64, lpApplicationName);
-            appShort[63] = L'\0';
-        }
-        if (lpCommandLine)
-        {
-            StringCchCopyW(cmdShort, 64, lpCommandLine);
-            cmdShort[63] = L'\0';
-        }
-        wsprintfW(dbg, L"[Obs] CreateProcessW enabled=%d app=\"%.63s\" cmd=\"%.63s\" wmic=%d\n",
-                  (int)ObsIsEnabled(), appShort, cmdShort, (int)injectWmic);
-        OutputDebugStringW(dbg);
-    }
-
-    // Create wmic.exe suspended so the agent is installed before it queries WMI.
+    // Create the target suspended so the agent is installed before it runs.
     BOOL                  wasAlreadySuspended = (dwCreationFlags & CREATE_SUSPENDED) != 0;
     DWORD                 flagsToUse          = dwCreationFlags;
     PROCESS_INFORMATION   localPi             = { 0 };
     LPPROCESS_INFORMATION piToUse             = lpProcessInformation ? lpProcessInformation : &localPi;
 
-    if (injectWmic)
+    if (injectShortLived)
         flagsToUse |= CREATE_SUSPENDED;
 
     result = OriginalCreateProcessW(
@@ -1226,9 +1378,9 @@ static BOOL WINAPI HookedCreateProcessW(
         lpEnvironment, lpCurrentDirectory,
         lpStartupInfo, piToUse);
 
-    if (result && injectWmic)
+    if (result && injectShortLived)
     {
-        RequestImmediateInjection(piToUse->dwProcessId);
+        InjectAndWaitForAgent(piToUse->dwProcessId);
         if (!wasAlreadySuspended)
             ResumeThread(piToUse->hThread);
         if (!lpProcessInformation)
@@ -1258,7 +1410,7 @@ static BOOL WINAPI HookedCreateProcessA(
 {
     LPSTR modifiedCmd = NULL;
     LPSTR cmdToUse    = lpCommandLine;
-    BOOL  injectWmic  = FALSE;
+    BOOL  injectShortLived = FALSE;
     BOOL  result;
 
     if (ObsIsEnabled())
@@ -1298,7 +1450,8 @@ static BOOL WINAPI HookedCreateProcessA(
             }
         }
 
-        // wmic.exe: detect for pre-injection.
+        // Short-lived recon tools (wmic.exe, whoami.exe) exit faster than the
+        // 100 ms process poll can inject them, so pre-inject via suspended start.
         BOOL isWmic = (lpApplicationName && StrStrIA(lpApplicationName, "wmic.exe") != NULL) ||
                       (lpCommandLine     && StrStrIA(lpCommandLine,     "wmic.exe") != NULL);
         if (!isWmic && lpCommandLine)
@@ -1310,7 +1463,11 @@ static BOOL WINAPI HookedCreateProcessA(
                 isWmic = (after == '\0' || after == ' ' || after == '\t' || after == '"');
             }
         }
-        injectWmic = isWmic;
+
+        BOOL isWhoami = (lpApplicationName && StrStrIA(lpApplicationName, "whoami") != NULL) ||
+                        (lpCommandLine     && StrStrIA(lpCommandLine,     "whoami") != NULL);
+
+        injectShortLived = isWmic || isWhoami;
     }
 
     BOOL                  wasAlreadySuspended = (dwCreationFlags & CREATE_SUSPENDED) != 0;
@@ -1318,7 +1475,7 @@ static BOOL WINAPI HookedCreateProcessA(
     PROCESS_INFORMATION   localPi             = { 0 };
     LPPROCESS_INFORMATION piToUse             = lpProcessInformation ? lpProcessInformation : &localPi;
 
-    if (injectWmic)
+    if (injectShortLived)
         flagsToUse |= CREATE_SUSPENDED;
 
     result = OriginalCreateProcessA(
@@ -1328,9 +1485,9 @@ static BOOL WINAPI HookedCreateProcessA(
         lpEnvironment, lpCurrentDirectory,
         lpStartupInfo, piToUse);
 
-    if (result && injectWmic)
+    if (result && injectShortLived)
     {
-        RequestImmediateInjection(piToUse->dwProcessId);
+        InjectAndWaitForAgent(piToUse->dwProcessId);
         if (!wasAlreadySuspended)
             ResumeThread(piToUse->hThread);
         if (!lpProcessInformation)
@@ -1364,6 +1521,100 @@ static BOOL WINAPI HookedCreateProcessA(
 // Sets *outLen to the length of the patched buffer.
 // Returns NULL if no VM strings were found (caller uses original).
 // Caller must HeapFree the returned pointer.
+// systeminfo emits each field's label and value in SEPARATE WriteConsole /
+// WriteFile calls (label+padding first, value next), so the label-anchored
+// replacements must carry state across calls — a label seen in one call is
+// matched against a value that arrives in a later call.  These identify which
+// field's value the patcher is currently waiting to swap.
+enum { OBS_SI_NONE = 0, OBS_SI_HOST, OBS_SI_MEM, OBS_SI_DOM };
+
+// NOTE: the Processor(s) COUNT line is deliberately left untouched.  Rewriting
+// it to "1 Processor(s) Installed." required holding each entry line's
+// indentation across write boundaries to drop the surplus entries, and that
+// machinery is what regressed systeminfo.  Every entry's CPU model is still
+// spoofed, so a 2-socket host reports two identical Trap CPUs — coherent, and
+// invisible to enumeration.
+
+// ------------------------------------------------------------
+//  Shared value builders for the systeminfo stdout patch.
+//  Each fills a wide buffer with the mode-appropriate replacement
+//  for one label-anchored field.  The ANSI patch path converts the
+//  result with WideCharToMultiByte; the wide path uses it directly.
+//  Only reached in Trap mode (the caller gates on OBS_MODE_TRAP).
+// ------------------------------------------------------------
+
+// Host Name: spoofed computer name, uppercased (systeminfo shows it uppercase).
+static VOID BuildSysInfoHostName(PWCHAR out, DWORD cch)
+{
+    ObsGetSpoofComputerName(out, cch);
+    CharUpperW(out);
+}
+
+// Total Physical Memory: "<n,nnn> MB" from the spoofed byte count.
+static VOID BuildSysInfoMemory(PWCHAR out, DWORD cch)
+{
+    ULONGLONG mb = ObsGetSpoofMemoryBytes() / (1024ULL * 1024ULL);
+
+    WCHAR digits[32];
+    StringCchPrintfW(digits, ARRAYSIZE(digits), L"%I64u", mb);
+
+    // Insert thousands separators.
+    int   len = (int)wcslen(digits);
+    WCHAR grouped[48];
+    int   gi = 0;
+    for (int i = 0; i < len && gi < (int)ARRAYSIZE(grouped) - 1; i++)
+    {
+        if (i > 0 && ((len - i) % 3) == 0)
+            grouped[gi++] = L',';
+        grouped[gi++] = digits[i];
+    }
+    grouped[gi] = L'\0';
+
+    StringCchPrintfW(out, cch, L"%s MB", grouped);
+}
+
+// Domain: mode-appropriate name.  Returns FALSE when the domain hook is off
+// (leave the real value untouched, consistent with the NetGetJoinInformation hook).
+static BOOL BuildSysInfoDomain(PWCHAR out, DWORD cch)
+{
+    if (ObsGetDomainMode() == OBS_DOMAIN_MODE_OFF)
+        return FALSE;
+    ObsGetSpoofDomainName(out, cch);
+    return TRUE;
+}
+
+// Copy a matched label (or "[0N]: " entry prefix) plus its run of padding
+// spaces, append the replacement value, then skip the original value to EOL.
+// Preserves systeminfo's column alignment and the entry's own index.  Returns
+// FALSE (caller falls back to a plain byte copy) if the emit would exceed 'cap'.
+static BOOL EmitSysInfoLabelA(LPBYTE dst, DWORD *pwi, DWORD cap,
+                              LPCBYTE src, DWORD *pri, DWORD srcLen,
+                              DWORD lblLen, const char *repl)
+{
+    DWORD wi = *pwi, ri = *pri;
+    DWORD replLen = (DWORD)strlen(repl);
+
+    if (wi + lblLen > cap) return FALSE;
+    CopyMemory(dst + wi, src + ri, lblLen);
+    wi += lblLen; ri += lblLen;
+
+    while (ri < srcLen && src[ri] == ' ')
+    {
+        if (wi >= cap) return FALSE;
+        dst[wi++] = src[ri++];
+    }
+
+    if (wi + replLen > cap) return FALSE;
+    CopyMemory(dst + wi, repl, replLen);
+    wi += replLen;
+
+    while (ri < srcLen && src[ri] != '\r' && src[ri] != '\n')
+        ri++;
+
+    *pwi = wi; *pri = ri;
+    return TRUE;
+}
+
 static LPBYTE PatchSysInfoOutput(LPCBYTE src, DWORD srcLen, DWORD *outLen)
 {
     static const char kBiosPfx[]   = "VMware, Inc. VMW";
@@ -1380,18 +1631,125 @@ static LPBYTE PatchSysInfoOutput(LPCBYTE src, DWORD srcLen, DWORD *outLen)
     const DWORD kMfgFindLen   = (DWORD)(sizeof(kMfgFind)    - 1);
     const DWORD kMfgReplLen   = (DWORD)(sizeof(kMfgRepl)    - 1);
 
-    // Replacements are all equal-length or shorter, +16 for any edge case.
-    DWORD  cap = srcLen + 16;
+    // Label-anchored replacements can be LONGER than the original value, so give
+    // generous headroom (each field appears once) and bounds-check every emit.
+    DWORD  cap = srcLen + 512;
     LPBYTE dst = (LPBYTE)HeapAlloc(GetProcessHeap(), 0, cap);
     if (!dst) return NULL;
+
+    // Field labels for the new Trap-mode fields.
+    static const char kHostLbl[] = "Host Name:";
+    static const char kMemLbl[]  = "Total Physical Memory:";
+    static const char kDomLbl[]  = "Domain:";
+    static const char kProcLbl[] = "Processor(s):";
+    static const char kCpuLbl[]  = "[01]: ";   // length of any "[0N]: " prefix
+    const DWORD kHostLblLen = (DWORD)(sizeof(kHostLbl) - 1);
+    const DWORD kMemLblLen  = (DWORD)(sizeof(kMemLbl)  - 1);
+    const DWORD kDomLblLen  = (DWORD)(sizeof(kDomLbl)  - 1);
+    const DWORD kProcLblLen = (DWORD)(sizeof(kProcLbl) - 1);
+    const DWORD kCpuLblLen  = (DWORD)(sizeof(kCpuLbl)  - 1);
+
+    // Build the mode-appropriate replacement values once.
+    WCHAR wbuf[64];
+    char  hostVal[128], memVal[64], domVal[512], cpuVal[160];
+
+    BuildSysInfoHostName(wbuf, ARRAYSIZE(wbuf));
+    WideCharToMultiByte(CP_ACP, 0, wbuf, -1, hostVal, sizeof(hostVal), NULL, NULL);
+    BuildSysInfoMemory(wbuf, ARRAYSIZE(wbuf));
+    WideCharToMultiByte(CP_ACP, 0, wbuf, -1, memVal, sizeof(memVal), NULL, NULL);
+    WideCharToMultiByte(CP_ACP, 0, OBS_TRAP_CPU_SYSINFO, -1, cpuVal, sizeof(cpuVal), NULL, NULL);
+
+    WCHAR domW[256];
+    BOOL  domOk = BuildSysInfoDomain(domW, ARRAYSIZE(domW));
+    if (domOk)
+        WideCharToMultiByte(CP_ACP, 0, domW, -1, domVal, sizeof(domVal), NULL, NULL);
+
+    // Cross-call state (systeminfo.exe is single-shot, so process-static is safe).
+    static int  s_pending   = OBS_SI_NONE;  // value awaited for a matched label
+    static BOOL s_expectCpu = FALSE;         // inside the Processor(s) entry block
+    static BOOL s_lineStart = TRUE;          // at the start of a logical line
 
     BOOL  changed = FALSE;
     DWORD ri = 0, wi = 0;
 
     while (ri < srcLen && wi < cap)
     {
-        DWORD      rem = srcLen - ri;
-        LPCBYTE    p   = src + ri;
+        DWORD   rem = srcLen - ri;
+        LPCBYTE p   = src + ri;
+
+        // (1) A label was matched earlier; consume (and swap) its value, which
+        //     may begin in a previous call and continue into this one.
+        if (s_pending != OBS_SI_NONE)
+        {
+            char c = (char)src[ri];
+            if (c == ' ' || c == '\t')            // copy the alignment padding
+            {
+                dst[wi++] = src[ri++];
+                s_lineStart = FALSE;
+                continue;
+            }
+            if (c != '\r' && c != '\n')           // first value char → replace
+            {
+                const char *repl = (s_pending == OBS_SI_HOST) ? hostVal :
+                                   (s_pending == OBS_SI_MEM)  ? memVal  : domVal;
+                DWORD rlen = (DWORD)strlen(repl);
+                if (wi + rlen <= cap)
+                {
+                    CopyMemory(dst + wi, repl, rlen);
+                    wi += rlen;
+                    while (ri < srcLen && src[ri] != '\r' && src[ri] != '\n')
+                        ri++;                     // drop the real value
+                    changed = TRUE;
+                }
+                else
+                {
+                    dst[wi++] = src[ri++];        // no room – leave value as-is
+                }
+                s_pending = OBS_SI_NONE;
+                s_lineStart = FALSE;
+                continue;
+            }
+            s_pending = OBS_SI_NONE;              // empty value – fall through
+        }
+
+        // (2) A column-0 line ends the Processor(s) entry block (entries are
+        //     indented; the next real field label starts at column 0).
+        if (s_expectCpu && s_lineStart && src[ri] != ' ')
+            s_expectCpu = FALSE;
+
+        // (3) Replace the CPU model on every "[0N]: ..." processor entry.
+        //     Matched mid-line (NOT gated on line start) because systeminfo
+        //     writes a line's indentation and its content as separate calls.
+        //     EmitSysInfoLabelA copies the entry's own "[0N]: " prefix, so each
+        //     entry keeps its index and only the model text is swapped.
+        if (s_expectCpu && rem >= kCpuLblLen && src[ri] == '[' && src[ri + 1] == '0' &&
+            EmitSysInfoLabelA(dst, &wi, cap, src, &ri, srcLen, kCpuLblLen, cpuVal))
+        {
+            changed = TRUE; s_lineStart = FALSE; continue;
+        }
+
+        // (4) Field labels: copy the label, then await its value in step (1).
+        //     Processor(s): count line is left as-is; it only arms step (3).
+        if (s_lineStart)
+        {
+            DWORD lbl = 0; int field = OBS_SI_NONE; BOOL isProc = FALSE;
+            if      (rem >= kHostLblLen && _strnicmp((const char *)p, kHostLbl, kHostLblLen) == 0) { lbl = kHostLblLen; field = OBS_SI_HOST; }
+            else if (rem >= kMemLblLen  && _strnicmp((const char *)p, kMemLbl,  kMemLblLen)  == 0) { lbl = kMemLblLen;  field = OBS_SI_MEM;  }
+            else if (domOk && rem >= kDomLblLen && _strnicmp((const char *)p, kDomLbl, kDomLblLen) == 0) { lbl = kDomLblLen; field = OBS_SI_DOM; }
+            else if (rem >= kProcLblLen && _strnicmp((const char *)p, kProcLbl, kProcLblLen) == 0) { lbl = kProcLblLen; isProc = TRUE; }
+
+            if ((field != OBS_SI_NONE || isProc) && wi + lbl <= cap)
+            {
+                CopyMemory(dst + wi, src + ri, lbl);
+                wi += lbl; ri += lbl;
+                if (isProc) s_expectCpu = TRUE;   // count line untouched
+                else        s_pending   = field;
+                s_lineStart = FALSE;
+                continue;
+            }
+        }
+
+        // (4) Existing value-based BIOS patterns.
 
         // Pattern 1: BIOS version prefix → replace value up to EOL
         if (rem >= kBiosPfxLen &&
@@ -1403,7 +1761,7 @@ static LPBYTE PatchSysInfoOutput(LPCBYTE src, DWORD srcLen, DWORD *outLen)
             // Skip the rest of the original VMware BIOS version string
             while (ri < srcLen && src[ri] != '\r' && src[ri] != '\n')
                 ri++;
-            changed = TRUE;
+            changed = TRUE; s_lineStart = FALSE;
             continue;
         }
 
@@ -1414,7 +1772,7 @@ static LPBYTE PatchSysInfoOutput(LPCBYTE src, DWORD srcLen, DWORD *outLen)
             CopyMemory(dst + wi, kModelRepl, kModelReplLen);
             wi += kModelReplLen;
             ri += kModelFindLen;
-            changed = TRUE;
+            changed = TRUE; s_lineStart = FALSE;
             continue;
         }
 
@@ -1425,10 +1783,12 @@ static LPBYTE PatchSysInfoOutput(LPCBYTE src, DWORD srcLen, DWORD *outLen)
             CopyMemory(dst + wi, kMfgRepl, kMfgReplLen);
             wi += kMfgReplLen;
             ri += kMfgFindLen;
-            changed = TRUE;
+            changed = TRUE; s_lineStart = FALSE;
             continue;
         }
 
+        // (5) Default copy.
+        s_lineStart = (src[ri] == '\n');
         dst[wi++] = src[ri++];
     }
 
@@ -1707,6 +2067,35 @@ static BOOL WINAPI HookedWriteConsoleA(
 // Sets *outCch to the character count of the patched buffer.
 // Returns NULL if no VM strings were found (caller uses original).
 // Caller must HeapFree the returned pointer.
+// Wide-string counterpart of EmitSysInfoLabelA (see there for behaviour).
+static BOOL EmitSysInfoLabelW(LPWSTR dst, DWORD *pwi, DWORD cap,
+                              LPCWSTR src, DWORD *pri, DWORD srcCch,
+                              DWORD lblLen, LPCWSTR repl)
+{
+    DWORD wi = *pwi, ri = *pri;
+    DWORD replLen = (DWORD)wcslen(repl);
+
+    if (wi + lblLen > cap) return FALSE;
+    CopyMemory(dst + wi, src + ri, lblLen * sizeof(WCHAR));
+    wi += lblLen; ri += lblLen;
+
+    while (ri < srcCch && src[ri] == L' ')
+    {
+        if (wi >= cap) return FALSE;
+        dst[wi++] = src[ri++];
+    }
+
+    if (wi + replLen > cap) return FALSE;
+    CopyMemory(dst + wi, repl, replLen * sizeof(WCHAR));
+    wi += replLen;
+
+    while (ri < srcCch && src[ri] != L'\r' && src[ri] != L'\n')
+        ri++;
+
+    *pwi = wi; *pri = ri;
+    return TRUE;
+}
+
 static LPWSTR PatchSysInfoOutputW(LPCWSTR src, DWORD srcCch, DWORD *outCch)
 {
     static const WCHAR kBiosPfx[]   = L"VMware, Inc. VMW";
@@ -1723,10 +2112,34 @@ static LPWSTR PatchSysInfoOutputW(LPCWSTR src, DWORD srcCch, DWORD *outCch)
     const DWORD kMfgFindLen   = (DWORD)(ARRAYSIZE(kMfgFind)    - 1);
     const DWORD kMfgReplLen   = (DWORD)(ARRAYSIZE(kMfgRepl)    - 1);
 
-    // Replacements are all equal-length or shorter, +16 for any edge case.
-    DWORD  cap = srcCch + 16;
+    // Label-anchored replacements can be LONGER than the original value, so give
+    // generous headroom (each field appears once) and bounds-check every emit.
+    DWORD  cap = srcCch + 512;
     LPWSTR dst = (LPWSTR)HeapAlloc(GetProcessHeap(), 0, cap * sizeof(WCHAR));
     if (!dst) return NULL;
+
+    // Field labels for the new Trap-mode fields.
+    static const WCHAR kHostLbl[] = L"Host Name:";
+    static const WCHAR kMemLbl[]  = L"Total Physical Memory:";
+    static const WCHAR kDomLbl[]  = L"Domain:";
+    static const WCHAR kProcLbl[] = L"Processor(s):";
+    static const WCHAR kCpuLbl[]  = L"[01]: ";  // length of any "[0N]: " prefix
+    const DWORD kHostLblLen = (DWORD)(ARRAYSIZE(kHostLbl) - 1);
+    const DWORD kMemLblLen  = (DWORD)(ARRAYSIZE(kMemLbl)  - 1);
+    const DWORD kDomLblLen  = (DWORD)(ARRAYSIZE(kDomLbl)  - 1);
+    const DWORD kProcLblLen = (DWORD)(ARRAYSIZE(kProcLbl) - 1);
+    const DWORD kCpuLblLen  = (DWORD)(ARRAYSIZE(kCpuLbl)  - 1);
+
+    // Build the mode-appropriate replacement values once.
+    WCHAR hostVal[128], memVal[64], domVal[256];
+    BuildSysInfoHostName(hostVal, ARRAYSIZE(hostVal));
+    BuildSysInfoMemory(memVal, ARRAYSIZE(memVal));
+    BOOL  domOk = BuildSysInfoDomain(domVal, ARRAYSIZE(domVal));
+
+    // Cross-call state (systeminfo.exe is single-shot, so process-static is safe).
+    static int  s_pending   = OBS_SI_NONE;  // value awaited for a matched label
+    static BOOL s_expectCpu = FALSE;         // inside the Processor(s) entry block
+    static BOOL s_lineStart = TRUE;          // at the start of a logical line
 
     BOOL  changed = FALSE;
     DWORD ri = 0, wi = 0;
@@ -1735,6 +2148,80 @@ static LPWSTR PatchSysInfoOutputW(LPCWSTR src, DWORD srcCch, DWORD *outCch)
     {
         DWORD   rem = srcCch - ri;
         LPCWSTR p   = src + ri;
+
+        // (1) A label was matched earlier; consume (and swap) its value, which
+        //     may begin in a previous call and continue into this one.
+        if (s_pending != OBS_SI_NONE)
+        {
+            WCHAR c = src[ri];
+            if (c == L' ' || c == L'\t')          // copy the alignment padding
+            {
+                dst[wi++] = src[ri++];
+                s_lineStart = FALSE;
+                continue;
+            }
+            if (c != L'\r' && c != L'\n')         // first value char → replace
+            {
+                LPCWSTR repl = (s_pending == OBS_SI_HOST) ? hostVal :
+                               (s_pending == OBS_SI_MEM)  ? memVal  : domVal;
+                DWORD rlen = (DWORD)wcslen(repl);
+                if (wi + rlen <= cap)
+                {
+                    CopyMemory(dst + wi, repl, rlen * sizeof(WCHAR));
+                    wi += rlen;
+                    while (ri < srcCch && src[ri] != L'\r' && src[ri] != L'\n')
+                        ri++;                     // drop the real value
+                    changed = TRUE;
+                }
+                else
+                {
+                    dst[wi++] = src[ri++];        // no room – leave value as-is
+                }
+                s_pending = OBS_SI_NONE;
+                s_lineStart = FALSE;
+                continue;
+            }
+            s_pending = OBS_SI_NONE;              // empty value – fall through
+        }
+
+        // (2) A column-0 line ends the Processor(s) entry block (entries are
+        //     indented; the next real field label starts at column 0).
+        if (s_expectCpu && s_lineStart && src[ri] != L' ')
+            s_expectCpu = FALSE;
+
+        // (3) Replace the CPU model on every "[0N]: ..." processor entry.
+        //     Matched mid-line (NOT gated on line start) because systeminfo
+        //     writes a line's indentation and its content as separate calls.
+        //     EmitSysInfoLabelW copies the entry's own "[0N]: " prefix, so each
+        //     entry keeps its index and only the model text is swapped.
+        if (s_expectCpu && rem >= kCpuLblLen && src[ri] == L'[' && src[ri + 1] == L'0' &&
+            EmitSysInfoLabelW(dst, &wi, cap, src, &ri, srcCch, kCpuLblLen, OBS_TRAP_CPU_SYSINFO))
+        {
+            changed = TRUE; s_lineStart = FALSE; continue;
+        }
+
+        // (4) Field labels: copy the label, then await its value in step (1).
+        //     Processor(s): count line is left as-is; it only arms step (3).
+        if (s_lineStart)
+        {
+            DWORD lbl = 0; int field = OBS_SI_NONE; BOOL isProc = FALSE;
+            if      (rem >= kHostLblLen && _wcsnicmp(p, kHostLbl, kHostLblLen) == 0) { lbl = kHostLblLen; field = OBS_SI_HOST; }
+            else if (rem >= kMemLblLen  && _wcsnicmp(p, kMemLbl,  kMemLblLen)  == 0) { lbl = kMemLblLen;  field = OBS_SI_MEM;  }
+            else if (domOk && rem >= kDomLblLen && _wcsnicmp(p, kDomLbl, kDomLblLen) == 0) { lbl = kDomLblLen; field = OBS_SI_DOM; }
+            else if (rem >= kProcLblLen && _wcsnicmp(p, kProcLbl, kProcLblLen) == 0) { lbl = kProcLblLen; isProc = TRUE; }
+
+            if ((field != OBS_SI_NONE || isProc) && wi + lbl <= cap)
+            {
+                CopyMemory(dst + wi, src + ri, lbl * sizeof(WCHAR));
+                wi += lbl; ri += lbl;
+                if (isProc) s_expectCpu = TRUE;   // count line untouched
+                else        s_pending   = field;
+                s_lineStart = FALSE;
+                continue;
+            }
+        }
+
+        // (4) Existing value-based BIOS patterns.
 
         // Pattern 1: BIOS version prefix → replace value up to EOL
         if (rem >= kBiosPfxLen &&
@@ -1746,7 +2233,7 @@ static LPWSTR PatchSysInfoOutputW(LPCWSTR src, DWORD srcCch, DWORD *outCch)
             // Skip the rest of the original VMware BIOS version string
             while (ri < srcCch && src[ri] != L'\r' && src[ri] != L'\n')
                 ri++;
-            changed = TRUE;
+            changed = TRUE; s_lineStart = FALSE;
             continue;
         }
 
@@ -1757,7 +2244,7 @@ static LPWSTR PatchSysInfoOutputW(LPCWSTR src, DWORD srcCch, DWORD *outCch)
             CopyMemory(dst + wi, kModelRepl, kModelReplLen * sizeof(WCHAR));
             wi += kModelReplLen;
             ri += kModelFindLen;
-            changed = TRUE;
+            changed = TRUE; s_lineStart = FALSE;
             continue;
         }
 
@@ -1768,10 +2255,12 @@ static LPWSTR PatchSysInfoOutputW(LPCWSTR src, DWORD srcCch, DWORD *outCch)
             CopyMemory(dst + wi, kMfgRepl, kMfgReplLen * sizeof(WCHAR));
             wi += kMfgReplLen;
             ri += kMfgFindLen;
-            changed = TRUE;
+            changed = TRUE; s_lineStart = FALSE;
             continue;
         }
 
+        // (5) Default copy.
+        s_lineStart = (src[ri] == L'\n');
         dst[wi++] = src[ri++];
     }
 
@@ -1918,6 +2407,7 @@ VOID InitializeHooks(VOID)
         CHAR *last = strrchr(path, '\\');
         g_IsSystemInfo = (last != NULL && _stricmp(last + 1, "systeminfo.exe") == 0);
         g_IsWmic       = (last != NULL && _stricmp(last + 1, "wmic.exe")       == 0);
+        g_IsWhoami     = (last != NULL && _stricmp(last + 1, "whoami.exe")     == 0);
         if (g_IsSystemInfo || g_IsWmic)
         {
             // Resolve from kernelbase.dll (actual implementation), not kernel32 forwarding
@@ -1954,6 +2444,8 @@ VOID InitializeHooks(VOID)
     OriginalCreateProcessA           = (BOOL(WINAPI*)(LPCSTR,LPSTR,LPSECURITY_ATTRIBUTES,LPSECURITY_ATTRIBUTES,BOOL,DWORD,LPVOID,LPCSTR,LPSTARTUPINFOA,LPPROCESS_INFORMATION))  RESOLVE_K32(CreateProcessA);
     OriginalNetGetJoinInformation    = (PFN_NetGetJoinInformation) ResolveFunction("netapi32.dll", "NetGetJoinInformation");
     g_NetApiBufferAllocate           = (PFN_NetApiBufferAllocate)  ResolveFunction("netapi32.dll", "NetApiBufferAllocate");
+    OriginalGetUserNameExW           = (PFN_GetUserNameExW)        ResolveFunction("secur32.dll", "GetUserNameExW");
+    OriginalLookupAccountSidW        = (PFN_LookupAccountSidW)     RESOLVE_ADV(LookupAccountSidW);
 
     // Begin Detours transaction
     DetourTransactionBegin();
@@ -1980,6 +2472,12 @@ VOID InitializeHooks(VOID)
     if (OriginalCreateProcessW)           DetourAttach(&(PVOID)OriginalCreateProcessW,           HookedCreateProcessW);
     if (OriginalCreateProcessA)           DetourAttach(&(PVOID)OriginalCreateProcessA,           HookedCreateProcessA);
     if (OriginalNetGetJoinInformation)    DetourAttach(&(PVOID)OriginalNetGetJoinInformation,    HookedNetGetJoinInformation);
+    if (OriginalGetUserNameExW)           DetourAttach(&(PVOID)OriginalGetUserNameExW,           HookedGetUserNameExW);
+    // LookupAccountSidW is used by the security/COM stack (e.g. systeminfo's WMI
+    // client resolves the current-user SID during connection setup); spoofing it
+    // process-wide breaks those.  Only whoami.exe needs it, so scope it there.
+    if (g_IsWhoami && OriginalLookupAccountSidW)
+        DetourAttach(&(PVOID)OriginalLookupAccountSidW, HookedLookupAccountSidW);
     if (g_IsSystemInfo || g_IsWmic)
     {
         if (OriginalWriteFile)            DetourAttach(&(PVOID)OriginalWriteFile,            HookedWriteFile);
@@ -1989,14 +2487,13 @@ VOID InitializeHooks(VOID)
 
     DetourTransactionCommit();
 
-    // Confirm injection in DebugView so we know which processes have the agent.
-    {
-        WCHAR procPath[MAX_PATH] = { 0 };
-        GetModuleFileNameW(NULL, procPath, MAX_PATH);
-        WCHAR dbg[MAX_PATH + 64];
-        wsprintfW(dbg, L"[Obs] Agent initialized in: %s\n", procPath);
-        OutputDebugStringW(dbg);
-    }
+    // Injection-confirmation trace removed for release builds.  To bring it
+    // back while debugging, re-add here:
+    //   WCHAR procPath[MAX_PATH] = { 0 };
+    //   GetModuleFileNameW(NULL, procPath, MAX_PATH);
+    //   WCHAR dbg[MAX_PATH + 64];
+    //   wsprintfW(dbg, L"[Obs] Agent initialized in: %s\n", procPath);
+    //   OutputDebugStringW(dbg);
 }
 
 VOID UninitializeHooks(VOID)
@@ -2025,6 +2522,9 @@ VOID UninitializeHooks(VOID)
     if (OriginalCreateProcessW)           DetourDetach(&(PVOID)OriginalCreateProcessW,           HookedCreateProcessW);
     if (OriginalCreateProcessA)           DetourDetach(&(PVOID)OriginalCreateProcessA,           HookedCreateProcessA);
     if (OriginalNetGetJoinInformation)    DetourDetach(&(PVOID)OriginalNetGetJoinInformation,    HookedNetGetJoinInformation);
+    if (OriginalGetUserNameExW)           DetourDetach(&(PVOID)OriginalGetUserNameExW,           HookedGetUserNameExW);
+    if (g_IsWhoami && OriginalLookupAccountSidW)
+        DetourDetach(&(PVOID)OriginalLookupAccountSidW, HookedLookupAccountSidW);
     if (g_IsSystemInfo || g_IsWmic)
     {
         if (OriginalWriteFile)            DetourDetach(&(PVOID)OriginalWriteFile,            HookedWriteFile);

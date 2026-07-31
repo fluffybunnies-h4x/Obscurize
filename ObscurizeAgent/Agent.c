@@ -78,6 +78,23 @@ BOOL InitializeAgent(VOID)
     s_initialized = TRUE;
     InitializeObsConfig();
     InitializeHooks();
+
+    // Signal the pre-injection handshake: hooks are now attached and config is
+    // loaded, so an injector holding this process suspended may safely resume
+    // it.  Opportunistic — if nobody is waiting, creating and setting the event
+    // is harmless.  See OBS_AGENT_READY_EVENT_FMT in ObscurizeDef.h.
+    {
+        WCHAR evName[64];
+        StringCchPrintfW(evName, ARRAYSIZE(evName),
+                         OBS_AGENT_READY_EVENT_FMT, GetCurrentProcessId());
+        HANDLE ready = CreateEventW(NULL, TRUE, FALSE, evName);  // manual reset
+        if (ready)
+        {
+            SetEvent(ready);
+            CloseHandle(ready);
+        }
+    }
+
     return TRUE;
 }
 

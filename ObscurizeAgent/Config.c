@@ -215,12 +215,14 @@ static DWORD WINAPI ConfigUpdateThread(LPVOID param)
 {
     (VOID)param;
 
-    // First load
-    POBS_CONFIG initial = ReadConfigFromRegistry();
-    EnterCriticalSection(&s_configLock);
-    s_config = initial;
-    LeaveCriticalSection(&s_configLock);
-
+    // First load happens synchronously in InitializeObsConfig (below), BEFORE
+    // InitializeHooks arms the hooks, so this thread only handles refresh.
+    //
+    // Do not move the first read here or make it lazy: once the hooks are live,
+    // ReadConfigFromRegistry's Reg* calls re-enter our own NtQueryValueKey /
+    // NtEnumerateKey hooks while this thread holds s_configLock, and any other
+    // thread calling ObsIsEnabled() blocks behind it.  In a multi-threaded WMI
+    // client like systeminfo.exe that stalls data collection indefinitely.
     while (TRUE)
     {
         Sleep(1000);
@@ -246,6 +248,16 @@ VOID InitializeObsConfig(VOID)
 {
     GenerateRandomIdentities();
     InitializeCriticalSection(&s_configLock);
+
+    // Synchronous first load, BEFORE InitializeHooks arms the hooks.  Reading
+    // here means the Reg* calls run through the ORIGINAL APIs (no hooks yet)
+    // and on a single thread with no lock contention — which is why this is
+    // safe in WMI clients, whereas a lazy post-hook load is not.
+    POBS_CONFIG initial = ReadConfigFromRegistry();
+    EnterCriticalSection(&s_configLock);
+    s_config = initial;
+    LeaveCriticalSection(&s_configLock);
+
     s_configThread = CreateThread(NULL, 0, ConfigUpdateThread, NULL, 0, NULL);
 }
 

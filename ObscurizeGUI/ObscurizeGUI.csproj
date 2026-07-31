@@ -13,9 +13,9 @@
     <LangVersion>10</LangVersion>
     <AssemblyName>ObscurizeGUI</AssemblyName>
     <RootNamespace>Obscurize</RootNamespace>
-    <Version>1.8.3</Version>
-    <AssemblyVersion>1.8.3.0</AssemblyVersion>
-    <FileVersion>1.8.3.0</FileVersion>
+    <Version>1.9.0</Version>
+    <AssemblyVersion>1.9.0.0</AssemblyVersion>
+    <FileVersion>1.9.0.0</FileVersion>
     <Company>Null-Sec</Company>
     <Product>Obscurize</Product>
     <Copyright>Copyright © 2026 Null-Sec</Copyright>
@@ -24,6 +24,19 @@
     <ApplicationManifest>Properties\app.manifest</ApplicationManifest>
     <PlatformTarget>AnyCPU</PlatformTarget>
     <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
+    <!--
+      Do not emit a PDB. The .NET compiler stamps the absolute build-machine
+      path to the PDB into the EXE's debug directory (e.g.
+      C:\Users\<name>\...\obj\Release\net48\ObscurizeGUI.pdb), which leaks the
+      developer's username and directory layout to anyone who runs `strings`
+      on a distributed binary. The C/C++ projects already produce no PDB in
+      Release; this brings the managed build in line.
+    -->
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+    <!-- Deterministic output: no absolute source paths in the assembly. -->
+    <Deterministic>true</Deterministic>
+    <PathMap>$(MSBuildProjectDirectory)=.</PathMap>
   </PropertyGroup>
 
   <!-- Link the shared constants file directly rather than a separate assembly -->

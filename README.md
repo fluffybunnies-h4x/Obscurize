@@ -72,7 +72,7 @@ Obscurize exploits this behaviour in two directions:
                                |  Reflective DLL injection (r77api InjectDll)
 +------------------------------v-----------------------------------+
 |  ObscurizeAgent32/64.dll  (injected into every user process)     |
-|  * Microsoft Detours hooks on Win32 + NT APIs (22 hooks total)   |
+|  * Microsoft Detours hooks on Win32 + NT APIs (26 hooks total)   |
 |  * Reads config from registry every 1 s                          |
 |  * Hooks are installed/removed without restarting the process    |
 +------------------------------------------------------------------+
@@ -153,7 +153,10 @@ attackers after initial access. When the Agent is injected into a
 `systeminfo.exe` process (detected at DLL load time by process name), it
 hooks `WriteFile`, `WriteConsoleA`, and `WriteConsoleW` on `kernelbase.dll`
 (the actual implementation, not the kernel32 forwarding stubs) to intercept
-stdout writes. Three patterns are replaced before output reaches the terminal:
+stdout writes. The patch runs only in Trap mode and applies two kinds of
+replacement before output reaches the terminal.
+
+**Value-based patterns** (search for a known VMware string, replace it):
 
 | Original string | Replacement |
 |---|---|
@@ -161,8 +164,35 @@ stdout writes. Three patterns are replaced before output reaches the terminal:
 | `VMware20,1` (system model) | `Precision 5560` |
 | `VMware, Inc.` (manufacturer) | `Dell Inc.` |
 
-The hook only activates in `systeminfo.exe` and `wmic.exe` to avoid overhead
-in all other processes.
+**Label-anchored fields** (the real value is host-specific and not known in
+advance, so the patch matches the field *label* at line start, preserves the
+label and its column padding, and overwrites the value to end-of-line):
+
+| Field label | Replacement source |
+|---|---|
+| `Host Name:` | Session-pinned spoofed computer name (`HostBinding`), uppercased |
+| `Processor(s):` → each `[0N]:` entry | `Intel64 Family 6 Model 140 Stepping 1 GenuineIntel ~3000 Mhz` (systeminfo-format, not the marketing name) |
+| `Total Physical Memory:` | Spoofed memory (`16,384 MB`) |
+| `Domain:` | Spoofed domain (`WORKGROUP` / `CORP.DEV`); left untouched when the domain hook is off |
+
+Processor entries are only rewritten after the `Processor(s):` label has been
+seen and before the next column-0 field, since the same `[0N]:` prefix is also
+used by `Network Card(s):` and `Hotfix(es):`. Each entry keeps its own index and
+only the model text is replaced. The processor **count** line is deliberately
+left alone: a multi-socket host reports N identical Trap CPUs, which is
+self-consistent and irrelevant to enumeration.
+
+**Implementation note — write chunking.** `systeminfo` does not emit its report
+in one call. A single line's label, its column padding, and its value routinely
+arrive in *separate* `WriteConsoleW` / `WriteFile` calls. The label-anchored
+replacements therefore carry state across calls: a matched label sets a "pending
+field", and the value is swapped whenever it arrives. For the same reason the
+`[0N]:` entry match must **not** be gated on being at the start of a line — the
+indentation frequently arrives as its own write, so a line-start test fails.
+Both the ANSI and wide patch paths implement this identically.
+
+The hook only activates in `systeminfo.exe` and `wmic.exe` to avoid overhead in
+all other processes.
 
 #### wmic.exe Serial Number Patching Detail
 
@@ -201,6 +231,51 @@ PowerShell's `Get-Service` cmdlet — calls the older, plain
 implementation) left `Get-Service` completely unfiltered in Trap mode even
 though every native enumeration path was correctly hidden. Both families are
 now hooked, covering native and managed callers alike.
+
+#### whoami.exe Username Detail
+
+Like service enumeration, the current username is a single conceptual fact that
+Windows exposes through several independent mechanisms — and `whoami.exe`
+imports three of them:
+
+| API | DLL | Used by |
+|---|---|---|
+| `GetUserNameW/A` | advapi32 | *not called by whoami at all* |
+| `GetUserNameExW` | secur32 | only the `/upn` and `/fqdn` switches |
+| `GetTokenInformation` → `LookupAccountSidW` | advapi32 | **plain `whoami` and `whoami /all`** |
+
+Plain `whoami` reads its access token's user SID and resolves it to a
+`DOMAIN\Username` pair via `LookupAccountSidW`. It never touches `GetUserNameW`,
+so the original hook never fired. Hooking `GetUserNameExW` did not help either —
+that is a real sibling, but it is only on the `/upn` and `/fqdn` paths. This was
+confirmed empirically: with a probe on `GetUserNameExW`, `whoami.exe` was
+verifiably injected and the hook armed, yet the probe never fired.
+
+`LookupAccountSidW` is now hooked, with two deliberate constraints:
+
+- **Scoped to the current user's SID.** The hook caches the process token's user
+  SID and rewrites the result only for that exact SID; group SIDs, other users,
+  and well-known SIDs pass straight through. The token still carries the real
+  SID — only the name it resolves to is rewritten.
+- **Scoped to `whoami.exe`** (`g_IsWhoami`, same pattern as the stdout hooks).
+  `LookupAccountSidW` is used broadly by the security and COM stacks; spoofing it
+  process-wide breaks WMI connection setup and hangs any WMI client, including
+  `systeminfo.exe`.
+
+The returned domain component is the session-pinned spoof computer name (or the
+NetBIOS form of the spoof domain when Domain is ON), so `whoami` reads
+consistently with the Host Name and Domain reported by `systeminfo`.
+`GetUserNameExW` remains hooked for the `NameSamCompatible` format so other
+tools reaching for *that* sibling are also covered, with all other
+`EXTENDED_NAME_FORMAT` values passed through to protect Kerberos / SSO paths.
+
+**Known limitation:** `whoami /all` prints the spoofed name beside the *real*
+SID. Obscurize rewrites SID→name resolution, not the token's SID itself.
+
+This is the same lesson as `Get-Service`, twice over: hooking one API for a fact
+does not cover the fact — it covers that one code path. Here the first "obvious"
+sibling was also the wrong one, and only instrumentation showed which mechanism
+the tool actually used.
 
 #### Domain Join Spoofing Detail
 
@@ -244,14 +319,18 @@ The domain name is configurable via the `NetworkDomain` registry value.
 
 ## API Hooks Reference
 
-The Agent installs up to 22 Detours hooks per process. The WriteFile /
-WriteConsoleA / WriteConsoleW hooks are only installed when the host process
-is `systeminfo.exe` or `wmic.exe`.
+The Agent installs up to 26 Detours hooks per process — 22 in every injected
+process, plus the WriteFile / WriteConsoleA / WriteConsoleW stdout hooks (only
+in `systeminfo.exe` and `wmic.exe`) and `LookupAccountSidW` (only in
+`whoami.exe`). The process-scoped hooks are gated because they touch APIs the
+rest of the system depends on.
 
 | Hook | DLL | Defensive | Trap |
 |---|---|---|---|
 | `GetUserNameW` | advapi32 | Random sandbox username (e.g. `sandbox3Rp8Kn`) | Session-pinned `firstname.lastname` (e.g. `joseph.johnson`) from `UserSID` registry value |
 | `GetUserNameA` | advapi32 | Random sandbox username (e.g. `sandbox3Rp8Kn`) | Session-pinned `firstname.lastname` from `UserSID` registry value |
+| `GetUserNameExW` | secur32 | `COMPUTERNAME\username` for `NameSamCompatible` callers (per-process identity) | Session-pinned `HOSTNAME\username`, or `DOMAIN\username` when Domain ON. Covers `whoami /upn` and `/fqdn`, not plain `whoami` |
+| `LookupAccountSidW` | advapi32 | `COMPUTERNAME\username` for the current-user SID only | Session-pinned `HOSTNAME\username` — this is what plain `whoami` and `whoami /all` use. **Only hooked in `whoami.exe`** |
 | `GetComputerNameExW` | kernel32 | Random `DESKTOP-XXXXXXX` (sandbox/consumer pattern) | Session-pinned `XXX-XXXXXX` corporate name (e.g. `DZC-KCTV3J`) from `HostBinding` registry value |
 | `GetComputerNameExA` | kernel32 | Random `DESKTOP-XXXXXXX` (sandbox/consumer pattern) | Session-pinned `XXX-XXXXXX` corporate name from `HostBinding` registry value |
 | `GlobalMemoryStatusEx` | kernel32 | Reports 2 048 MB RAM | Reports 16 384 MB RAM |
@@ -270,9 +349,9 @@ is `systeminfo.exe` or `wmic.exe`.
 | `GetSystemFirmwareTable` | kernel32 | VMware strings in RSMB table | Dell strings in RSMB table |
 | `CreateProcessW` | kernel32 | Strips `-NoProfile` from PS spawns; creates wmic.exe suspended for pre-injection | Strips `-NoProfile` from PS spawns; creates wmic.exe suspended for pre-injection |
 | `CreateProcessA` | kernel32 | Strips `-NoProfile` from PS spawns; creates wmic.exe suspended for pre-injection | Strips `-NoProfile` from PS spawns; creates wmic.exe suspended for pre-injection |
-| `WriteFile` | kernelbase | -- | Patches systeminfo.exe and wmic.exe stdout (VM->Dell strings) |
-| `WriteConsoleA` | kernelbase | -- | Patches systeminfo.exe and wmic.exe stdout (VM->Dell strings) |
-| `WriteConsoleW` | kernelbase | -- | Patches systeminfo.exe and wmic.exe stdout via ConPTY path |
+| `WriteFile` | kernelbase | -- | Patches systeminfo.exe (BIOS/model/mfg + Host Name, Processor, memory, domain) and wmic.exe stdout |
+| `WriteConsoleA` | kernelbase | -- | Patches systeminfo.exe (BIOS/model/mfg + Host Name, Processor, memory, domain) and wmic.exe stdout |
+| `WriteConsoleW` | kernelbase | -- | Same as WriteConsoleA, via the ConPTY / Windows Terminal path |
 | `NetGetJoinInformation` | netapi32 | `WORKGROUP` / `PartOfDomain: False` | `CORP.DEV` / `PartOfDomain: True` (when Domain ON) |
 
 ---
@@ -603,7 +682,7 @@ Obscurize/
 +-- ObscurizeAgent/
 |   +-- Agent.c / .h                <- DLL entry point, injection marker
 |   +-- Config.c / .h               <- Registry config reader (1 s poll)
-|   +-- Hooks.c / .h                <- All 22 Detours API hooks
+|   +-- Hooks.c / .h                <- All 26 Detours API hooks
 |   +-- Spoof.c / .h                <- Lookup tables, artefact install/remove
 |   +-- SmbiosSpoof.c / .h          <- Raw SMBIOS (RSMB) table patching
 |   +-- ObscurizeAgent-x86.vcxproj

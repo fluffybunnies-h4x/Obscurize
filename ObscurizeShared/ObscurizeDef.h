@@ -147,6 +147,9 @@
 #define OBS_TRAP_CPU_NAME           L"11th Gen Intel(R) Core(TM) i7-1185G7 @ 3.00GHz"
 #define OBS_TRAP_CPU_VENDOR         L"GenuineIntel"
 #define OBS_TRAP_CPU_MHZ            3000
+// systeminfo prints the low-level family/model form under Processor(s), not the
+// marketing name.  i7-1185G7 = Tiger Lake = Family 6, Model 140 (0x8C).
+#define OBS_TRAP_CPU_SYSINFO        L"Intel64 Family 6 Model 140 Stepping 1 GenuineIntel ~3000 Mhz"
 
 // ------------------------------------------------------------
 //  Domain spoof values  (used by NetGetJoinInformation hook)
@@ -212,6 +215,27 @@
 // ------------------------------------------------------------
 
 #define OBS_CONTROL_PIPE_NAME       L"\\\\.\\pipe\\ObscurizeCtrl"
+
+// ------------------------------------------------------------
+//  Agent-ready event  (pre-injection handshake)
+// ------------------------------------------------------------
+//
+//  InjectDll() returns as soon as the remote thread is CREATED, not when the
+//  agent's DllMain finishes, so a pre-injected process resumed immediately can
+//  run (and exit) before its hooks are attached — this is why plain `whoami`
+//  printed the real identity while the slower `whoami /all` was spoofed.
+//
+//  The injecting process creates this per-PID event before requesting
+//  injection and waits on it before ResumeThread; the agent sets it once
+//  InitializeHooks() has returned.  Session-local namespace: injector and
+//  target are the same user/session, so no SeCreateGlobalPrivilege needed.
+//  Format argument: target process id.
+#define OBS_AGENT_READY_EVENT_FMT   L"Local\\ObscurizeAgentReady-%lu"
+
+/// Milliseconds to wait for the agent to finish installing hooks before
+/// resuming a pre-injected process.  On timeout the process is resumed anyway
+/// (worst case is the old unsynchronized behaviour, never a hang).
+#define OBS_AGENT_READY_TIMEOUT_MS  1500
 
 // ------------------------------------------------------------
 //  Control codes  (GUI -> Service pipe protocol)
