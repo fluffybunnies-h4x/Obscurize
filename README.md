@@ -18,6 +18,17 @@ Spoofing is applied at runtime via an injected DLL — no system files are
 modified, no kernel driver is required. All changes are reversed when the
 service stops.
 
+<table>
+<tr>
+<td width="50%" align="center"><strong>Defensive Mode</strong><br/><sub>real host presented as a sandbox VM</sub></td>
+<td width="50%" align="center"><strong>Trap Mode</strong><br/><sub>honeypot VM presented as real hardware</sub></td>
+</tr>
+<tr>
+<td width="50%"><img src="ObscurizeDefenseMode.png" alt="Obscurize control panel in Defensive mode" width="100%"/></td>
+<td width="50%"><img src="ObscurizeTrapMode.png" alt="Obscurize control panel in Trap mode" width="100%"/></td>
+</tr>
+</table>
+
 ---
 
 ## Threat Model & Background
