@@ -1,0 +1,63 @@
+Historical MIT License — Obscurize versions through 1.9.0
+=========================================================
+
+Obscurize was originally published under the MIT License. On 2026-10-05 the
+project moved to the PolyForm Shield License 1.0.0 (see `LICENSE`) for all
+subsequent development.
+
+This file records the earlier grant. It is not revoked, and it is not intended
+to be read as revoked.
+
+WHAT REMAINS AVAILABLE UNDER MIT
+--------------------------------
+
+The MIT License below continues to apply, permanently, to every version of
+Obscurize published before the relicensing commit. Specifically:
+
+  * All commits up to and including 7ab094b ("Add control panel screenshots
+    for both modes to README").
+  * The `1.9.0_Release` tag, published 2026-08-14, and its binary asset
+    `Obscurize_190.zip`.
+
+Anyone who obtained a copy of any of the above received the MIT grant with
+that copy. The MIT License contains no revocation clause and that grant is
+perpetual. Changing the license of the project going forward does not and
+cannot withdraw it. If you are using a version at or below 1.9.0 and the
+PolyForm Shield terms are inconvenient for you, you may continue to rely on
+the MIT terms for that version.
+
+WHAT IS NOT COVERED BY MIT
+--------------------------
+
+Everything committed after 7ab094b is licensed under the PolyForm Shield
+License 1.0.0 only. This includes, without limitation, the multi-agent
+management console and any later agent work. Mixing post-relicense code into
+an MIT-licensed derivative of 1.9.0 is not permitted by this file.
+
+Third-party code redistributed in this repository has always been, and
+remains, under its own license. See `THIRD-PARTY-NOTICES.md`.
+
+ORIGINAL LICENSE TEXT
+---------------------
+
+MIT License
+
+Copyright (c) 2026 Fluffy Bunnies
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

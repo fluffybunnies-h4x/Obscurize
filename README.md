@@ -18,6 +18,13 @@ Spoofing is applied at runtime via an injected DLL — no system files are
 modified, no kernel driver is required. All changes are reversed when the
 service stops.
 
+> **License:** source-available under the
+> [PolyForm Shield License 1.0.0](LICENSE) — free to use and modify to
+> defend your own systems or your organization's, at any scale; a
+> [commercial license](COMMERCIAL-LICENSE.md) is required to ship it inside
+> a product you provide to others. Releases through `1.9.0_Release` remain
+> MIT-licensed. See [License](#license).
+
 <table>
 <tr>
 <td width="50%" align="center"><strong>Defensive Mode</strong><br/><sub>real host presented as a sandbox VM</sub></td>
@@ -901,3 +908,57 @@ regardless of mode or configuration:
   is x64-only. 32-bit agent injection on a 64-bit host works via the x86 DLL.
 - **Secure Desktop / PPL processes** — Protected processes (antivirus, LSA)
   are excluded from injection by design.
+
+---
+
+## License
+
+Obscurize Community Edition is licensed under the
+[PolyForm Shield License 1.0.0](LICENSE).
+
+In plain English: **use it freely to defend yourself, don't sell it as your
+own product.**
+
+| | |
+|---|---|
+| Run it on your own machines, at home or at work | **Free** |
+| Deploy it across your organization, any size, as part of a paid security program | **Free** |
+| Modify it, build it, deploy your own build internally | **Free** |
+| Use it in research, malware analysis, honeypots, teaching, CTFs | **Free** |
+| Use it as a tool while delivering security services to clients | **Free** |
+| Ship it inside an EDR, AV, sandbox, or deception product you provide to others | **Commercial license required** |
+| Offer a rebranded build or a substitute product, paid or free | **Commercial license required** |
+
+Being a large company does not require a license. Competing does. If you need
+to do something the Noncompete section blocks, see
+[COMMERCIAL-LICENSE.md](COMMERCIAL-LICENSE.md) — the terms are a gate, not a
+wall.
+
+Shield is a **source-available** license, not an OSI-approved open-source
+license. The Noncompete section discriminates against a field of use, which
+the Open Source Definition does not permit. The source is public, auditable,
+and free to build and modify — but calling it "open source" would not be
+accurate, so this project does not.
+
+### Earlier versions remain MIT
+
+Releases up to and including [`1.9.0_Release`](https://github.com/fluffybunnies-h4x/Obscurize/releases)
+were published under the MIT License. That grant is perpetual and is not
+withdrawn — if you are using 1.9.0 or the `Obscurize_190.zip` release package,
+the MIT terms still apply to it. See
+[LICENSE-MIT-HISTORICAL](LICENSE-MIT-HISTORICAL).
+
+Everything after that point, including the multi-agent management console, is
+PolyForm Shield only.
+
+### Third-party code
+
+Obscurize compiles r77-rootkit source into the agent and links Microsoft
+Detours, both MIT-licensed. Those components keep their own terms and are not
+covered by the Shield license. Full notices and an itemized dependency list
+are in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
+
+### Contributing
+
+Issues and findings are welcome; unsolicited pull requests are not currently
+accepted. See [CONTRIBUTING.md](CONTRIBUTING.md) for the reason.
